@@ -1,0 +1,36 @@
+- op: add
+  path: /spec/volumeClaimTemplates/0/spec/storageClassName
+  value: ember-local
+- op: add
+  path: /spec/template/spec/initContainers
+  value:
+    - name: prepare-data
+      image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -ec
+        - mkdir -p /var/lib/postgresql/data/pgdata && chown -R 70:70 /var/lib/postgresql/data
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - CHOWN
+            - DAC_OVERRIDE
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data

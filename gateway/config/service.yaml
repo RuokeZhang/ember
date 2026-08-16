@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ember-gateway
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-gateway
+    app.kubernetes.io/part-of: ember
+    component: gateway
+spec:
+  selector:
+    app.kubernetes.io/name: ember-gateway
+    component: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

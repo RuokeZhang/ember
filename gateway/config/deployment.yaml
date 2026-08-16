@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ember-gateway
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-gateway
+    app.kubernetes.io/part-of: ember
+    component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ember-gateway
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ember-gateway
+        app.kubernetes.io/part-of: ember
+        component: gateway
+    spec:
+      serviceAccountName: ember-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: ember-gateway:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen-address=:8080
+            - --namespace=ember-system
+            - --public-key-file=/var/run/ember/jwt/public.key
+            - --prometheus-url=http://ember-prometheus.ember-system.svc.cluster.local:9090
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: jwt-public-key
+              mountPath: /var/run/ember/jwt
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: jwt-public-key
+          secret:
+            secretName: ember-jwt-keys
+            items:
+              - key: public.key
+                path: public.key
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+        - name: tmp
+          emptyDir: {}

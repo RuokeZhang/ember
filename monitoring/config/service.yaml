@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ember-prometheus
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-prometheus
+    app.kubernetes.io/part-of: ember
+    component: prometheus
+spec:
+  selector:
+    app.kubernetes.io/name: ember-prometheus
+    component: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http

@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ember-prometheus
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-prometheus
+    app.kubernetes.io/part-of: ember
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 2s
+      evaluation_interval: 2s
+    scrape_configs:
+      - job_name: ember-engines
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            regex: engine
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: http
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_label_ember_dev_endpoint_uid]
+            target_label: endpoint_uid
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod

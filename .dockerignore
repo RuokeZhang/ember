@@ -1,0 +1,15 @@
+.cache
+.git
+.DS_Store
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+*.pem
+kubeconfig*
+bin
+*.test
+web/node_modules
+web/dist
+coverage.out

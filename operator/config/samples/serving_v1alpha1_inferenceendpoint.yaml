@@ -1,0 +1,19 @@
+apiVersion: serving.ember.dev/v1alpha1
+kind: InferenceEndpoint
+metadata:
+  name: ep-7f92c8
+  namespace: ember-system
+spec:
+  ownerID: usr_31d2
+  model:
+    id: qwen2.5-7b-instruct-awq
+    revision: 9c1f4ae
+  profile: standard
+  scaling:
+    minReplicas: 0
+    maxReplicas: 3
+    targetQueueDepth: 4
+    idleTimeoutSeconds: 900
+  placement:
+    cachePreference: Preferred
+    maxColdStartFallbackSeconds: 120

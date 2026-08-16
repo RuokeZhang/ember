@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ember-gateway
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-gateway
+    app.kubernetes.io/part-of: ember
+rules:
+  - apiGroups: [serving.ember.dev]
+    resources: [inferenceendpoints]
+    verbs: [create, get, list, watch, patch, delete]
+  - apiGroups: [serving.ember.dev]
+    resources: [inferenceendpoints/status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ember-gateway
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-gateway
+    app.kubernetes.io/part-of: ember
+subjects:
+  - kind: ServiceAccount
+    name: ember-gateway
+    namespace: ember-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ember-gateway

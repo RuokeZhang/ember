@@ -1,0 +1,12 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ember-workload-pod-policy-binding
+spec:
+  policyName: ember-workload-pod-policy
+  validationActions:
+    - Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        ember.dev/admission-policy: hostpath-cache-only

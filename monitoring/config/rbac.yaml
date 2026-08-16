@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ember-prometheus
+  labels:
+    app.kubernetes.io/name: ember-prometheus
+    app.kubernetes.io/part-of: ember
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ember-prometheus
+  labels:
+    app.kubernetes.io/name: ember-prometheus
+    app.kubernetes.io/part-of: ember
+subjects:
+  - kind: ServiceAccount
+    name: ember-prometheus
+    namespace: ember-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ember-prometheus

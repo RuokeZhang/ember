@@ -1,0 +1,38 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ember-workload-pod-policy
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "object.spec.serviceAccountName == 'engine'"
+      message: "Ember workload Pods must use the engine ServiceAccount."
+    - expression: "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false"
+      message: "Ember workload Pods must disable automountServiceAccountToken."
+    - expression: "has(object.metadata.labels) && object.metadata.labels['ember.dev/managed'] == 'true'"
+      message: "Ember workload Pods must carry ember.dev/managed=true."
+    - expression: "has(object.metadata.labels) && object.metadata.labels['ember.dev/endpoint-uid'] != ''"
+      message: "Ember workload Pods must carry ember.dev/endpoint-uid."
+    - expression: "has(object.metadata.labels) && object.metadata.labels['ember.dev/owner'] != ''"
+      message: "Ember workload Pods must carry ember.dev/owner."
+    - expression: "has(object.metadata.labels) && object.metadata.labels['component'] == 'engine'"
+      message: "Only operator-managed engine Pods are allowed in Ember workload namespaces."
+    - expression: "has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot"
+      message: "Ember workload Pods must set pod securityContext.runAsNonRoot=true."
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith('/var/lib/ember/models'))"
+      message: "hostPath volumes must stay under /var/lib/ember/models."
+    - expression: "!has(object.spec.containers) || object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && has(c.securityContext.capabilities) && c.securityContext.capabilities.drop.exists(cap, cap == 'ALL') && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault')"
+      message: "All containers must be non-root, drop ALL, forbid privilege escalation, use RuntimeDefault seccomp, and keep a read-only root filesystem."
+    - expression: "!has(object.spec.initContainers) || object.spec.initContainers.all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && has(c.securityContext.capabilities) && c.securityContext.capabilities.drop.exists(cap, cap == 'ALL') && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault')"
+      message: "All init containers must be non-root, drop ALL, forbid privilege escalation, use RuntimeDefault seccomp, and keep a read-only root filesystem."
+    - expression: "!has(object.spec.containers) || object.spec.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, !has(object.spec.volumes) || !object.spec.volumes.exists(v, v.name == m.name && has(v.hostPath)) || m.readOnly))"
+      message: "Containers may mount hostPath-backed volumes only as read-only."
+    - expression: "!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, !has(object.spec.volumes) || !object.spec.volumes.exists(v, v.name == m.name && has(v.hostPath)) || m.readOnly))"
+      message: "Init containers may mount hostPath-backed volumes only as read-only."

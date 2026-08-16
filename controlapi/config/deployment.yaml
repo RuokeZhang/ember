@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ember-control-api
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-control-api
+    app.kubernetes.io/part-of: ember
+    component: control-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ember-control-api
+      component: control-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ember-control-api
+        app.kubernetes.io/part-of: ember
+        component: control-api
+    spec:
+      serviceAccountName: ember-control-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - until pg_isready -h ember-postgres -p 5432; do sleep 2; done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: control-api
+          image: ember-control-api:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen-address=:8080
+            - --database-url-file=/var/run/ember/postgres/database-url
+            - --gateway-url=http://ember-gateway.ember-system.svc.cluster.local:8080
+            - --private-key-file=/var/run/ember/jwt/private.key
+            - --web-root=/web
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: jwt-private-key
+              mountPath: /var/run/ember/jwt
+              readOnly: true
+            - name: postgres-url
+              mountPath: /var/run/ember/postgres
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: jwt-private-key
+          secret:
+            secretName: ember-jwt-keys
+            items:
+              - key: private.key
+                path: private.key
+        - name: postgres-url
+          secret:
+            secretName: ember-postgres
+            items:
+              - key: database-url
+                path: database-url
+        - name: tmp
+          emptyDir: {}
