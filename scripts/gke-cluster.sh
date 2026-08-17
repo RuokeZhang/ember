@@ -11,6 +11,7 @@ GPU_MACHINE_TYPE=${GPU_MACHINE_TYPE:-g2-standard-8}
 NODE_SERVICE_ACCOUNT_NAME=${NODE_SERVICE_ACCOUNT_NAME:-ember-gke-nodes}
 GPU_TTL_HOURS=${GPU_TTL_HOURS:-3}
 CLUSTER_TTL_HOURS=${CLUSTER_TTL_HOURS:-6}
+NODE_POOL_CREATE_TIMEOUT_MINUTES=${NODE_POOL_CREATE_TIMEOUT_MINUTES:-60}
 
 usage() {
   cat <<'EOF'
@@ -32,6 +33,8 @@ Environment:
                       Default: ember-gke-nodes
   GPU_TTL_HOURS       Default: 3
   CLUSTER_TTL_HOURS   Default: 6
+  NODE_POOL_CREATE_TIMEOUT_MINUTES
+                      Default: 60
 EOF
 }
 
@@ -59,6 +62,7 @@ resolve_config() {
   [[ "${CLUSTER_LOCATION}" =~ ^[a-z]+-[a-z]+[0-9]+-[a-z]$ ]] || die "CLUSTER_LOCATION must be a zone such as us-central1-a"
   [[ "${GPU_TTL_HOURS}" =~ ^[1-9][0-9]*$ ]] || die "GPU_TTL_HOURS must be a positive integer"
   [[ "${CLUSTER_TTL_HOURS}" =~ ^[1-9][0-9]*$ ]] || die "CLUSTER_TTL_HOURS must be a positive integer"
+  [[ "${NODE_POOL_CREATE_TIMEOUT_MINUTES}" =~ ^[1-9][0-9]*$ ]] || die "NODE_POOL_CREATE_TIMEOUT_MINUTES must be a positive integer"
   ((CLUSTER_TTL_HOURS > GPU_TTL_HOURS)) || die "CLUSTER_TTL_HOURS must exceed GPU_TTL_HOURS"
   NODE_SERVICE_ACCOUNT_EMAIL="${NODE_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 }
@@ -89,24 +93,47 @@ validate_existing_cluster() {
 }
 
 validate_existing_gpu_pool() {
-  local description machine_type accelerator spot max_nodes label has_storage_scope
-  description=$("${GCLOUD}" container node-pools describe "${GPU_NODE_POOL}" \
+  local description machine_type accelerator spot autoscaling_enabled min_nodes max_nodes label has_storage_scope
+  if ! description=$("${GCLOUD}" container node-pools describe "${GPU_NODE_POOL}" \
     --cluster="${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
     --location="${CLUSTER_LOCATION}" \
-    --format=json)
+    --format=json); then
+    echo "gke cluster: could not describe GPU node pool ${GPU_NODE_POOL}" >&2
+    return 1
+  fi
   machine_type=$(jq -r '.config.machineType // empty' <<<"${description}")
   accelerator=$(jq -r '.config.accelerators[0].acceleratorType // empty' <<<"${description}")
   spot=$(jq -r '.config.spot // false' <<<"${description}")
+  autoscaling_enabled=$(jq -r '.autoscaling.enabled // false' <<<"${description}")
+  min_nodes=$(jq -r '.autoscaling.minNodeCount // 0' <<<"${description}")
   max_nodes=$(jq -r '.autoscaling.maxNodeCount // 0' <<<"${description}")
   label=$(jq -r '.config.labels["ember.dev/gpu"] // empty' <<<"${description}")
   has_storage_scope=$(jq -r 'any(.config.oauthScopes[]?; . == "https://www.googleapis.com/auth/devstorage.read_only" or . == "https://www.googleapis.com/auth/cloud-platform")' <<<"${description}")
-  [[ "${machine_type}" == "${GPU_MACHINE_TYPE}" ]] || die "existing GPU pool uses ${machine_type}, expected ${GPU_MACHINE_TYPE}"
-  [[ "${accelerator}" == "nvidia-l4" ]] || die "existing GPU pool does not use NVIDIA L4"
-  [[ "${spot}" == "true" ]] || die "existing GPU pool is not Spot"
-  [[ "${max_nodes}" == "1" ]] || die "existing GPU pool max node count is not 1"
-  [[ "${label}" == "l4" ]] || die "existing GPU pool lacks ember.dev/gpu=l4"
-  [[ "${has_storage_scope}" == "true" ]] || die "existing GPU pool cannot download the managed NVIDIA driver"
+  if [[ "${machine_type}" != "${GPU_MACHINE_TYPE}" ]]; then
+    echo "gke cluster: existing GPU pool uses ${machine_type}, expected ${GPU_MACHINE_TYPE}" >&2
+    return 1
+  fi
+  if [[ "${accelerator}" != "nvidia-l4" ]]; then
+    echo "gke cluster: existing GPU pool does not use NVIDIA L4" >&2
+    return 1
+  fi
+  if [[ "${spot}" != "true" ]]; then
+    echo "gke cluster: existing GPU pool is not Spot" >&2
+    return 1
+  fi
+  if [[ "${autoscaling_enabled}" != "true" || "${min_nodes}" != "0" || "${max_nodes}" != "1" ]]; then
+    echo "gke cluster: existing GPU pool autoscaling must be enabled with min=0 and max=1" >&2
+    return 1
+  fi
+  if [[ "${label}" != "l4" ]]; then
+    echo "gke cluster: existing GPU pool lacks ember.dev/gpu=l4" >&2
+    return 1
+  fi
+  if [[ "${has_storage_scope}" != "true" ]]; then
+    echo "gke cluster: existing GPU pool cannot download the managed NVIDIA driver" >&2
+    return 1
+  fi
 }
 
 cost_guard() {
@@ -142,6 +169,53 @@ get_credentials() {
   "${GCLOUD}" container clusters get-credentials "${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
     --location="${CLUSTER_LOCATION}"
+}
+
+wait_for_container_operation() {
+  local operation_name=$1
+  local deadline=$((SECONDS + NODE_POOL_CREATE_TIMEOUT_MINUTES * 60))
+  local description status error_code error_message
+
+  while ((SECONDS < deadline)); do
+    if ! description=$("${GCLOUD}" container operations describe "${operation_name}" \
+      --project="${PROJECT_ID}" \
+      --location="${CLUSTER_LOCATION}" \
+      --format=json); then
+      sleep 10
+      continue
+    fi
+    status=$(jq -r '.status // empty' <<<"${description}")
+    case "${status}" in
+    DONE)
+      error_code=$(jq -r '.error.code // 0' <<<"${description}")
+      if [[ ! "${error_code}" =~ ^[0-9]+$ ]]; then
+        echo "GKE operation ${operation_name} returned invalid error code ${error_code}" >&2
+        return 1
+      fi
+      if ((error_code != 0)); then
+        error_message=$(jq -r '
+          if ((.error.message // "") | length) > 0 then .error.message
+          elif ((.statusMessage // "") | length) > 0 then .statusMessage
+          else "unknown error"
+          end
+        ' <<<"${description}")
+        echo "GKE operation ${operation_name} failed with code ${error_code}: ${error_message}" >&2
+        return 1
+      fi
+      return 0
+      ;;
+    PENDING | RUNNING | ABORTING)
+      sleep 10
+      ;;
+    *)
+      echo "GKE operation ${operation_name} reported unexpected status ${status}" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  echo "GKE operation ${operation_name} did not finish within ${NODE_POOL_CREATE_TIMEOUT_MINUTES} minutes" >&2
+  return 1
 }
 
 delete_new_cluster() {
@@ -208,12 +282,13 @@ create_cluster() {
   fi
 
   if gpu_pool_exists; then
-    validate_existing_gpu_pool
+    validate_existing_gpu_pool || die "existing GPU node pool failed validation"
     echo "GPU node pool ${GPU_NODE_POOL} already exists; cleanup timers were refreshed."
     return
   fi
 
-  if ! "${GCLOUD}" container node-pools create "${GPU_NODE_POOL}" \
+  local operation_name
+  if ! operation_name=$("${GCLOUD}" container node-pools create "${GPU_NODE_POOL}" \
     --cluster="${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
     --location="${CLUSTER_LOCATION}" \
@@ -233,11 +308,32 @@ create_cluster() {
     --scopes=gke-default \
     --metadata=disable-legacy-endpoints=true \
     --enable-autorepair \
-    --enable-autoupgrade; then
+    --enable-autoupgrade \
+    --async \
+    --format='value(name)'); then
     if [[ "${created_cluster}" == "true" ]]; then
       delete_new_cluster
     fi
     die "GPU node pool creation failed"
+  fi
+  operation_name=${operation_name##*/}
+  [[ "${operation_name}" =~ ^operation-[a-zA-Z0-9-]+$ ]] || {
+    if [[ "${created_cluster}" == "true" ]]; then
+      delete_new_cluster
+    fi
+    die "GPU node pool creation did not return an operation name"
+  }
+  if ! wait_for_container_operation "${operation_name}" || ! gpu_pool_exists; then
+    if [[ "${created_cluster}" == "true" ]]; then
+      delete_new_cluster
+    fi
+    die "GPU node pool creation failed"
+  fi
+  if ! validate_existing_gpu_pool; then
+    if [[ "${created_cluster}" == "true" ]]; then
+      delete_new_cluster
+    fi
+    die "GPU node pool failed post-create validation"
   fi
 
   echo "Created one Spot NVIDIA L4 node with active ${GPU_TTL_HOURS}h/${CLUSTER_TTL_HOURS}h cleanup timers."

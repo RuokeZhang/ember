@@ -153,6 +153,19 @@ func TestClusterScriptArmsCleanupBeforeGPUAndAllowsDriverDownload(t *testing.T) 
 	if arm < 0 || createGPU < 0 || arm > createGPU {
 		t.Fatal("cost guard must be armed before the GPU node pool is created")
 	}
+	for _, required := range []string{
+		"--async",
+		"NODE_POOL_CREATE_TIMEOUT_MINUTES",
+		`wait_for_container_operation "${operation_name}"`,
+		"validate_existing_gpu_pool",
+		".error.code // 0",
+		".autoscaling.enabled // false",
+		".autoscaling.minNodeCount // 0",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("GKE cluster script missing long-running node-pool safeguard %q", required)
+		}
+	}
 }
 
 func TestCostGuardRequiresExistingGPUPoolByDefault(t *testing.T) {
