@@ -116,6 +116,7 @@ cost_guard() {
     GPU_NODE_POOL="${GPU_NODE_POOL}" \
     GPU_TTL_HOURS="${GPU_TTL_HOURS}" \
     CLUSTER_TTL_HOURS="${CLUSTER_TTL_HOURS}" \
+    ALLOW_MISSING_GPU_POOL="${ALLOW_MISSING_GPU_POOL:-false}" \
     ./scripts/gcp-cost-guard.sh "$@"
 }
 
@@ -199,7 +200,7 @@ create_cluster() {
     die "could not configure kubectl credentials"
   fi
 
-  if ! cost_guard arm; then
+  if ! ALLOW_MISSING_GPU_POOL=true cost_guard arm; then
     if [[ "${created_cluster}" == "true" ]]; then
       delete_new_cluster
     fi
