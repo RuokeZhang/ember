@@ -9,8 +9,6 @@ resources:
   - ../../gateway/config
   - ../../controlapi/config
   - ../../monitoring/config
-  - postgres-storage.yaml
-  - fake-gpu-daemonset.yaml
 patches:
   - target:
       group: apps
@@ -21,7 +19,7 @@ patches:
     patch: |-
       - op: add
         path: /spec/template/spec/containers/0/args/-
-        value: --simulation-mode
+        value: --prefetch-image=EMBER_PREFETCH_IMAGE
   - target:
       group: apps
       version: v1
@@ -38,4 +36,11 @@ patches:
       kind: StatefulSet
       name: ember-postgres
       namespace: ember-system
-    path: postgres-statefulset-patch.yaml
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/nodeSelector
+      - op: remove
+        path: /spec/template/spec/tolerations
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: standard-rwo

@@ -15,6 +15,7 @@ type options struct {
 	WatchNamespace string
 	SimulationMode bool
 	EnableKEDA     bool
+	PrefetchImage  string
 }
 
 func parseOptions() options {
@@ -31,6 +32,11 @@ func parseOptions() options {
 	flag.BoolVar(&opts.SimulationMode, "simulation-mode", simulationMode, "Use reduced CPU and memory requests while preserving GPU scheduling semantics.")
 	enableKEDA, _ := strconv.ParseBool(os.Getenv("EMBER_ENABLE_KEDA"))
 	flag.BoolVar(&opts.EnableKEDA, "enable-keda", enableKEDA, "Create KEDA ScaledObjects for endpoint Deployments.")
+	defaultPrefetchImage := os.Getenv("EMBER_PREFETCH_IMAGE")
+	if defaultPrefetchImage == "" {
+		defaultPrefetchImage = "ember-prefetch:dev"
+	}
+	flag.StringVar(&opts.PrefetchImage, "prefetch-image", defaultPrefetchImage, "Image used for cache materialization and verification.")
 	flag.Parse()
 	return opts
 }

@@ -27,7 +27,7 @@ func TestKubernetesStoreValidatesAndOwnsEndpoints(t *testing.T) {
 	store, c := newTestKubernetesStore(t)
 	_, err := store.CreateEndpoint(ctx, "owner-a", "ep-valid", CreateEndpointRequest{
 		ModelID:                  "qwen2.5-7b-instruct-awq",
-		Revision:                 "9c1f4ae",
+		Revision:                 "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:                  servingv1alpha1.ProfileStandard,
 		MaxReplicas:              3,
 		TargetQueueDepth:         4,
@@ -55,7 +55,7 @@ func TestKubernetesStoreCreateIsIdempotentForMatchingEndpoint(t *testing.T) {
 	store, _ := newTestKubernetesStore(t)
 	request := CreateEndpointRequest{
 		ModelID:                  "qwen2.5-7b-instruct-awq",
-		Revision:                 "9c1f4ae",
+		Revision:                 "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:                  servingv1alpha1.ProfileStandard,
 		MaxReplicas:              3,
 		TargetQueueDepth:         4,

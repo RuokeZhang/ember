@@ -59,6 +59,33 @@ func TestEndpointReconcileWaitsForModelCacheBeforeDeployment(t *testing.T) {
 	}
 }
 
+func TestEndpointReconcileUsesRealArtifactMetadataOutsideSimulation(t *testing.T) {
+	ctx := context.Background()
+	endpoint := testEndpoint()
+	model, _ := catalog.LookupModel(endpoint.Spec.Model.ID)
+	reconciler, c := newControllerClient(t, endpoint)
+	reconciler.SimulationMode = false
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(endpoint)}
+
+	mustReconcile(t, ctx, reconciler, req)
+	mustReconcile(t, ctx, reconciler, req)
+
+	cache := &servingv1alpha1.ModelCache{}
+	if err := c.Get(ctx, client.ObjectKey{Name: catalog.ModelCacheNameForModel(model)}, cache); err != nil {
+		t.Fatalf("get real model cache: %v", err)
+	}
+	if cache.Spec.Digest != model.Digest || cache.Spec.SizeBytes != model.SizeBytes {
+		t.Fatalf("real model cache used wrong artifact metadata: %#v", cache.Spec)
+	}
+	current := &servingv1alpha1.InferenceEndpoint{}
+	if err := c.Get(ctx, req.NamespacedName, current); err != nil {
+		t.Fatalf("get endpoint: %v", err)
+	}
+	if current.Status.Model.ResolvedDigest != model.Digest || current.Status.Model.SizeBytes != model.SizeBytes {
+		t.Fatalf("real endpoint status used wrong artifact metadata: %#v", current.Status.Model)
+	}
+}
+
 func TestEndpointReconcileCreatesPinnedDeploymentWhenCacheReady(t *testing.T) {
 	ctx := context.Background()
 	endpoint := testEndpoint()
@@ -410,7 +437,8 @@ func mustReconcile(t *testing.T, ctx context.Context, reconciler *EndpointReconc
 }
 
 func testEndpoint() *servingv1alpha1.InferenceEndpoint {
-	endpoint := &servingv1alpha1.InferenceEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "ep-7f92c8", Namespace: servingv1alpha1.EmberSystemNamespace, UID: types.UID("7f92c8aa-1111-2222-3333-444444444444"), Generation: 1, CreationTimestamp: metav1.NewTime(time.Date(2026, 8, 15, 19, 0, 0, 0, time.UTC))}, Spec: servingv1alpha1.InferenceEndpointSpec{OwnerID: "usr_31d2", Model: servingv1alpha1.InferenceEndpointModelSpec{ID: "qwen2.5-7b-instruct-awq", Revision: "9c1f4ae"}, Profile: servingv1alpha1.ProfileStandard, Scaling: servingv1alpha1.InferenceEndpointScalingSpec{MinReplicas: 0, MaxReplicas: 3, TargetQueueDepth: 4, IdleTimeoutSeconds: 900}, Placement: servingv1alpha1.InferenceEndpointPlacementSpec{CachePreference: servingv1alpha1.CachePreferencePreferred, MaxColdStartFallbackSeconds: 120}}}
+	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
+	endpoint := &servingv1alpha1.InferenceEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "ep-7f92c8", Namespace: servingv1alpha1.EmberSystemNamespace, UID: types.UID("7f92c8aa-1111-2222-3333-444444444444"), Generation: 1, CreationTimestamp: metav1.NewTime(time.Date(2026, 8, 15, 19, 0, 0, 0, time.UTC))}, Spec: servingv1alpha1.InferenceEndpointSpec{OwnerID: "usr_31d2", Model: servingv1alpha1.InferenceEndpointModelSpec{ID: model.ID, Revision: model.Revision}, Profile: servingv1alpha1.ProfileStandard, Scaling: servingv1alpha1.InferenceEndpointScalingSpec{MinReplicas: 0, MaxReplicas: 3, TargetQueueDepth: 4, IdleTimeoutSeconds: 900}, Placement: servingv1alpha1.InferenceEndpointPlacementSpec{CachePreference: servingv1alpha1.CachePreferencePreferred, MaxColdStartFallbackSeconds: 120}}}
 	endpoint.Default()
 	return endpoint
 }

@@ -67,7 +67,7 @@ func TestServerSessionAndIdempotentEndpointLifecycle(t *testing.T) {
 	}
 	var created endpointResponse
 	decodeControlResponse(t, firstCreateResponse, &created)
-	if created.ID != "ep-fixed-1" || created.Revision != "9c1f4ae" || created.TargetQueueDepth != 4 {
+	if created.ID != "ep-fixed-1" || created.Revision != "b25037543e9394b818fdfca67ab2a00ecc7dd641" || created.TargetQueueDepth != 4 {
 		t.Fatalf("control API did not resolve catalog defaults: %#v", created)
 	}
 	if gateway.createCalls != 1 || gateway.lastCreate.EndpointID != created.ID {
@@ -160,7 +160,7 @@ func TestServerHidesCrossOwnerMetadata(t *testing.T) {
 		OwnerID:     "owner-a",
 		DisplayName: "Private",
 		ModelID:     "qwen2.5-7b-instruct-awq",
-		Revision:    "9c1f4ae",
+		Revision:    "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:     "standard",
 		CreatedAt:   time.Now().UTC(),
 	}
@@ -191,7 +191,7 @@ func TestServerPreservesGatewayActivationResponse(t *testing.T) {
 		OwnerID:       "owner-a",
 		DisplayName:   "Ready",
 		ModelID:       "qwen2.5-7b-instruct-awq",
-		Revision:      "9c1f4ae",
+		Revision:      "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:       "standard",
 		MaxReplicas:   1,
 		EndpointUID:   "uid-ready",
@@ -244,7 +244,7 @@ func TestServerProxiesTelemetryWithoutAudit(t *testing.T) {
 				OwnerID:     "owner-a",
 				DisplayName: "Ready",
 				ModelID:     "qwen2.5-7b-instruct-awq",
-				Revision:    "9c1f4ae",
+				Revision:    "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 				Profile:     "standard",
 				EndpointUID: "uid-ready",
 				CreatedAt:   time.Now().UTC(),
@@ -288,7 +288,7 @@ func TestServerRejectsInvalidMetricsQueryBeforeProxy(t *testing.T) {
 		ID:          "ep-ready",
 		OwnerID:     "owner-a",
 		ModelID:     "qwen2.5-7b-instruct-awq",
-		Revision:    "9c1f4ae",
+		Revision:    "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:     "standard",
 		EndpointUID: "uid-ready",
 		CreatedAt:   time.Now().UTC(),

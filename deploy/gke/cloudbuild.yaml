@@ -1,0 +1,37 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - --file=Dockerfile.operator
+      - --tag=${_REGISTRY}/ember-operator:${_IMAGE_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - --file=Dockerfile.prefetch
+      - --tag=${_REGISTRY}/ember-prefetch:${_IMAGE_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - --file=Dockerfile.gateway
+      - --tag=${_REGISTRY}/ember-gateway:${_IMAGE_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - --file=Dockerfile.control-api
+      - --tag=${_REGISTRY}/ember-control-api:${_IMAGE_TAG}
+      - .
+images:
+  - ${_REGISTRY}/ember-operator:${_IMAGE_TAG}
+  - ${_REGISTRY}/ember-prefetch:${_IMAGE_TAG}
+  - ${_REGISTRY}/ember-gateway:${_IMAGE_TAG}
+  - ${_REGISTRY}/ember-control-api:${_IMAGE_TAG}
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

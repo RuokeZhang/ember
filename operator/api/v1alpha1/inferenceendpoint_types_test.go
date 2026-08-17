@@ -116,7 +116,7 @@ func validEndpoint() *InferenceEndpoint {
 			OwnerID: "usr_31d2",
 			Model: InferenceEndpointModelSpec{
 				ID:       "qwen2.5-7b-instruct-awq",
-				Revision: "9c1f4ae",
+				Revision: "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 			},
 			Profile: ProfileStandard,
 			Scaling: InferenceEndpointScalingSpec{

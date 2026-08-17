@@ -61,7 +61,7 @@ func TestModelCacheReconcileMarksReadyOnJobCompletionAndDerivesReferences(t *tes
 	cache := pendingModelCache(model)
 	node := gpuNode("node-a", 2)
 	node.Labels[catalog.CacheLabelKeyForModel(model)] = "loading"
-	job := resources.PrefetchJob(cache, "node-a", true)
+	job := resources.PrefetchJob(cache, "node-a", true, resources.PrefetchImage)
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(time.Date(2026, 8, 15, 19, 10, 0, 0, time.UTC))}}
 	endpoint := testEndpoint()
 	reconciler, c := newModelCacheReconciler(t, cache, node, job, endpoint)
@@ -92,7 +92,7 @@ func TestModelCacheReconcileHandlesJobFailureWithoutDuplicateJobs(t *testing.T) 
 	cache := pendingModelCache(model)
 	node := gpuNode("node-a", 2)
 	node.Labels[catalog.CacheLabelKeyForModel(model)] = "loading"
-	job := resources.PrefetchJob(cache, "node-a", true)
+	job := resources.PrefetchJob(cache, "node-a", true, resources.PrefetchImage)
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "digest mismatch", LastTransitionTime: metav1.NewTime(time.Date(2026, 8, 15, 19, 10, 0, 0, time.UTC))}}
 	reconciler, c := newModelCacheReconciler(t, cache, node, job)
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cache)}
@@ -129,7 +129,7 @@ func TestModelCacheReconcileRestartSafeWithExistingActiveJob(t *testing.T) {
 	cache := pendingModelCache(model)
 	node := gpuNode("node-a", 2)
 	node.Labels[catalog.CacheLabelKeyForModel(model)] = "loading"
-	job := resources.PrefetchJob(cache, "node-a", true)
+	job := resources.PrefetchJob(cache, "node-a", true, resources.PrefetchImage)
 	job.Status.Active = 1
 	reconciler, c := newModelCacheReconciler(t, cache, node, job)
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cache)}

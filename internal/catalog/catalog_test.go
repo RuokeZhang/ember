@@ -35,4 +35,37 @@ func TestSimulationArtifactMetadataIsExplicitAndSeparate(t *testing.T) {
 	if model.SimulationArtifact.Digest == model.Digest {
 		t.Fatal("simulation artifact digest must not equal reviewed real model digest")
 	}
+	if model.EngineImageForMode(true) != model.SimulationImage || model.EngineImageForMode(false) != model.EngineImage {
+		t.Fatal("expected simulation and real runtime images to remain separate")
+	}
+}
+
+func TestRealModelManifestIsImmutableAndSelfConsistent(t *testing.T) {
+	model, _ := LookupModel("qwen2.5-7b-instruct-awq")
+	if model.Revision != "b25037543e9394b818fdfca67ab2a00ecc7dd641" || model.Source.Revision != model.Revision {
+		t.Fatalf("unexpected immutable revision: model=%q source=%q", model.Revision, model.Source.Revision)
+	}
+	if model.Source.BaseURL != "https://huggingface.co" || model.Source.Repository != "Qwen/Qwen2.5-7B-Instruct-AWQ" {
+		t.Fatalf("unexpected reviewed source: %#v", model.Source)
+	}
+	if len(model.Source.Files) != 9 {
+		t.Fatalf("expected nine runtime files, got %d", len(model.Source.Files))
+	}
+	if got := ModelFilesDigest(model.Source.Files); got != model.Digest {
+		t.Fatalf("manifest digest mismatch: got %q want %q", got, model.Digest)
+	}
+	if got := ModelFilesSize(model.Source.Files); got != model.SizeBytes {
+		t.Fatalf("manifest size mismatch: got %d want %d", got, model.SizeBytes)
+	}
+}
+
+func TestLookupModelReturnsIndependentManifest(t *testing.T) {
+	first, _ := LookupModel("qwen2.5-7b-instruct-awq")
+	first.Source.Files[0].Digest = "sha256:mutated"
+	first.NodePoolSelector[DefaultGPUNodeLabelKey] = "mutated"
+
+	second, _ := LookupModel("qwen2.5-7b-instruct-awq")
+	if second.Source.Files[0].Digest == "sha256:mutated" || second.NodePoolSelector[DefaultGPUNodeLabelKey] == "mutated" {
+		t.Fatal("catalog lookup returned mutable shared state")
+	}
 }

@@ -68,7 +68,7 @@ func TestGatewayClientSignsOwnerAndFiltersBrowserCredentials(t *testing.T) {
 	endpoint, err := client.CreateEndpoint(context.Background(), "owner-a", "req-123", GatewayCreateRequest{
 		EndpointID:               "ep-client",
 		ModelID:                  "qwen2.5-7b-instruct-awq",
-		Revision:                 "9c1f4ae",
+		Revision:                 "b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		Profile:                  servingv1alpha1.ProfileStandard,
 		MaxReplicas:              1,
 		TargetQueueDepth:         4,

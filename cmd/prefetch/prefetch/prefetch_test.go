@@ -1,14 +1,19 @@
 package prefetch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/RuokeZhang/ember/internal/catalog"
 	"github.com/RuokeZhang/ember/operator/cacheartifact"
 )
 
@@ -63,6 +68,103 @@ func TestVerifyOnly(t *testing.T) {
 	}
 }
 
+func TestRunDownloadsAndVerifiesImmutableModelManifest(t *testing.T) {
+	root := newScratchDir(t)
+	files := map[string][]byte{
+		"config.json":         []byte(`{"model_type":"test"}`),
+		"tokenizer.json":      []byte(`{"version":"1.0"}`),
+		"weights.safetensors": cacheartifact.SimulationArtifactBytes(),
+	}
+	source := catalog.ModelSource{
+		BaseURL:    "",
+		Repository: "test/model",
+		Revision:   "immutable-revision",
+	}
+	for _, filePath := range []string{"config.json", "tokenizer.json", "weights.safetensors"} {
+		data := files[filePath]
+		source.Files = append(source.Files, catalog.ModelFile{
+			Path:        filePath,
+			Digest:      cacheartifact.DigestBytes(data),
+			SizeBytes:   int64(len(data)),
+			Safetensors: strings.HasSuffix(filePath, ".safetensors"),
+		})
+	}
+	requests := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		prefix := "/test/model/resolve/immutable-revision/"
+		if request.Method != http.MethodGet || !strings.HasPrefix(request.URL.Path, prefix) {
+			http.NotFound(w, request)
+			return
+		}
+		filePath := strings.TrimPrefix(request.URL.Path, prefix)
+		data, ok := files[filePath]
+		if !ok {
+			http.NotFound(w, request)
+			return
+		}
+		requests[filePath]++
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	source.BaseURL = server.URL
+
+	options := Options{
+		Root:           root,
+		CacheHash:      "abcdef1234567890",
+		ExpectedDigest: catalog.ModelFilesDigest(source.Files),
+		ExpectedSize:   catalog.ModelFilesSize(source.Files),
+		ModelID:        "test-model",
+		Revision:       source.Revision,
+		Source:         &source,
+		HTTPClient:     server.Client(),
+	}
+	if err := Run(context.Background(), options); err != nil {
+		t.Fatalf("real prefetch failed: %v", err)
+	}
+	for filePath := range files {
+		if requests[filePath] != 1 {
+			t.Fatalf("expected one exact request for %q, got %d", filePath, requests[filePath])
+		}
+	}
+	verifyOptions := Options{
+		Root:           root,
+		CacheHash:      options.CacheHash,
+		ExpectedDigest: options.ExpectedDigest,
+		ExpectedSize:   options.ExpectedSize,
+		VerifyOnly:     true,
+	}
+	if err := Run(context.Background(), verifyOptions); err != nil {
+		t.Fatalf("verify real cache failed: %v", err)
+	}
+}
+
+func TestRealSourcePathTraversalRejectedBeforeDownload(t *testing.T) {
+	root := newScratchDir(t)
+	source := catalog.ModelSource{
+		BaseURL:    "http://127.0.0.1",
+		Repository: "test/model",
+		Revision:   "immutable-revision",
+		Files: []catalog.ModelFile{{
+			Path:      "../outside",
+			Digest:    "sha256:" + strings.Repeat("0", 64),
+			SizeBytes: 1,
+		}},
+	}
+	options := Options{
+		Root:           root,
+		CacheHash:      "abcdef1234567890",
+		ExpectedDigest: catalog.ModelFilesDigest(source.Files),
+		ExpectedSize:   1,
+		ModelID:        "test-model",
+		Revision:       source.Revision,
+		Source:         &source,
+	}
+	if err := Run(context.Background(), options); err == nil || !strings.Contains(err.Error(), "unsafe path") {
+		t.Fatalf("expected source path traversal rejection, got %v", err)
+	}
+}
+
 func TestDigestMismatchFails(t *testing.T) {
 	root := newScratchDir(t)
 	options := Options{Root: root, CacheHash: "abcdef1234567890", ExpectedDigest: "sha256:deadbeef", Synthetic: true}
@@ -77,18 +179,16 @@ func TestDigestMismatchFails(t *testing.T) {
 func TestSafetensorsRejection(t *testing.T) {
 	root := newScratchDir(t)
 	metadata := cacheartifact.SimulationMetadata()
-	finalDir := filepath.Join(root, "abcdef1234567890")
-	if err := os.MkdirAll(finalDir, 0o755); err != nil {
-		t.Fatalf("mkdir final dir: %v", err)
+	options := Options{Root: root, CacheHash: "abcdef1234567890", ExpectedDigest: metadata.Digest, ExpectedSize: metadata.SizeBytes, Synthetic: true}
+	if err := Run(context.Background(), options); err != nil {
+		t.Fatalf("seed run failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(finalDir, cacheartifact.ArtifactFileName), []byte("not-safetensors"), 0o644); err != nil {
-		t.Fatalf("write invalid artifact: %v", err)
+	invalid := bytes.Repeat([]byte("x"), int(metadata.SizeBytes))
+	if err := os.WriteFile(filepath.Join(root, options.CacheHash, cacheartifact.ArtifactFileName), invalid, 0o644); err != nil {
+		t.Fatalf("corrupt artifact: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(finalDir, cacheartifact.ManifestFileName), []byte(`{"digest":"`+metadata.Digest+`"}`), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	options := Options{Root: root, CacheHash: "abcdef1234567890", ExpectedDigest: metadata.Digest, VerifyOnly: true}
-	if err := Run(context.Background(), options); err == nil || !strings.Contains(err.Error(), "validate safetensors artifact") {
+	options = Options{Root: root, CacheHash: "abcdef1234567890", ExpectedDigest: metadata.Digest, ExpectedSize: metadata.SizeBytes, VerifyOnly: true}
+	if err := Run(context.Background(), options); err == nil || !strings.Contains(err.Error(), "validate safetensors file") {
 		t.Fatalf("expected safetensors validation failure, got %v", err)
 	}
 }

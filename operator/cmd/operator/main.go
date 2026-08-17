@@ -50,9 +50,9 @@ func main() {
 	directClient, err := crclient.New(ctrl.GetConfigOrDie(), crclient.Options{Scheme: scheme})
 	must(err)
 
-	endpointReconciler := &controllers.EndpointReconciler{Client: mgr.GetClient(), DirectClient: directClient, APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), ManagedNamespace: opts.WatchNamespace, SimulationMode: opts.SimulationMode, EnableKEDA: opts.EnableKEDA}
+	endpointReconciler := &controllers.EndpointReconciler{Client: mgr.GetClient(), DirectClient: directClient, APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), ManagedNamespace: opts.WatchNamespace, SimulationMode: opts.SimulationMode, EnableKEDA: opts.EnableKEDA, PrefetchImage: opts.PrefetchImage}
 	must(endpointReconciler.SetupWithManager(mgr))
-	modelCacheReconciler := &controllers.ModelCacheReconciler{Client: mgr.GetClient(), DirectClient: directClient, APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), ManagedNamespace: opts.WatchNamespace, SimulationMode: opts.SimulationMode}
+	modelCacheReconciler := &controllers.ModelCacheReconciler{Client: mgr.GetClient(), DirectClient: directClient, APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), ManagedNamespace: opts.WatchNamespace, SimulationMode: opts.SimulationMode, PrefetchImage: opts.PrefetchImage}
 	must(modelCacheReconciler.SetupWithManager(mgr))
 	must(mgr.AddHealthzCheck("healthz", healthz.Ping))
 	must(mgr.AddReadyzCheck("readyz", healthz.Ping))

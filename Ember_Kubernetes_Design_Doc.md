@@ -5,7 +5,7 @@
 **Date:** August 15, 2026
 **Target:** Portfolio project. Kubernetes control plane on GKE; product surface hosted on Replit.
 
-**Implementation status (Kind):** The repository now implements the local portions of the control plane and Phase 4 product surface: model-cache simulation, Gateway, KEDA/Prometheus integration, Postgres Control API, and React interface. The Kind path uses an in-repository fake GPU device plugin, synthetic safetensors, and a mock OpenAI-compatible engine. GKE, real NVIDIA L4/vLLM measurements, Replit hosting, and the optional Phase 5 items remain future validation work; no simulated timing is presented as real GPU performance.
+**Implementation status:** The repository implements the Kind control plane and Phase 4 product surface plus the real-runtime transition: immutable Qwen file manifests, streaming verified prefetch, a digest-pinned official vLLM image, a real-mode GKE overlay, amd64 Cloud Build, one-L4 Spot cluster automation, and automatic cleanup. Kind still uses the in-repository fake GPU device plugin, synthetic safetensors, and mock OpenAI-compatible engine. Real NVIDIA L4 measurements, Replit hosting, and the optional Phase 5 items remain future validation work; no simulated timing is presented as real GPU performance.
 
 ---
 
@@ -254,8 +254,8 @@ Each serving Pod:
 1. Requests `nvidia.com/gpu: <profile.gpuCount>` and tolerates the GPU node taint.
 2. Mounts the node-local weight cache read-only at `/models`.
 3. Runs an init container that verifies the expected weight files and digests exist in the cache, and fails fast with `CacheMiss` if not — the placement logic should have prevented this, and a failure here is a bug worth surfacing loudly.
-4. Starts the engine with `--model /models/<hash>`, `--served-model-name <public-id>`, and profile-derived flags. No user-supplied engine arguments.
-5. Exposes a readiness probe that requires both the HTTP server to answer and one synthetic completion to succeed. A vLLM process accepts connections well before it can generate; probing only the socket produces an endpoint that reports Ready and then times out on the first real request.
+4. Starts the engine with `--model /models/cache`, `--served-model-name <public-id>`, and profile-derived flags. No user-supplied engine arguments.
+5. Uses vLLM's `/health` endpoint behind a bounded 15-minute startup probe, followed by readiness and liveness probes. The separate hardware smoke test sends a real chat completion before the validation run is accepted.
 6. Runs as non-root with a read-only root filesystem, writable `/tmp` and `/dev/shm` only.
 
 The `/dev/shm` exception matters: tensor-parallel serving uses shared memory for inter-rank communication and the Kubernetes default of 64 MB will hang a `tp>1` deployment in a way that looks like a scheduling problem. The design allocates a `Memory`-backed `emptyDir` at `/dev/shm` sized by profile.
@@ -276,7 +276,7 @@ spec:
   ownerID: usr_31d2
   model:
     id: qwen2.5-7b-instruct-awq        # allowlisted catalog key
-    revision: 9c1f4ae                   # immutable upstream commit
+    revision: b25037543e9394b818fdfca67ab2a00ecc7dd641  # immutable upstream commit
   profile: standard                     # small | standard | tp2
   scaling:
     minReplicas: 0
@@ -298,8 +298,8 @@ status:
     node: gke-ember-l4-spot-a3f1
     cacheState: Hit
   model:
-    resolvedDigest: sha256:4f2a...
-    sizeBytes: 5872025600
+    resolvedDigest: sha256:41d12f80b6d62f01e9134f410ab177d907ccb025e41bbb651bd83e8e8304f010
+    sizeBytes: 5582381128
   lastActivityTime: "2026-08-15T20:47:03Z"
   conditions:
     - type: Ready
@@ -338,7 +338,7 @@ The original design used six condition types including `Terminal` and `Deleting`
 
 | Condition | Meaning when `True` |
 |---|---|
-| `Ready` | The endpoint is serving and a synthetic completion succeeded |
+| `Ready` | The verified engine Deployment has completed rollout and its readiness probe is healthy |
 | `Progressing` | The controller is actively moving toward the desired state |
 | `Degraded` | Something is wrong that the controller cannot resolve by itself |
 
@@ -362,12 +362,12 @@ A second, cluster-scoped CRD tracking weight materialization per node pool.
 apiVersion: serving.ember.dev/v1alpha1
 kind: ModelCache
 metadata:
-  name: qwen2-5-7b-instruct-awq-9c1f4ae
+  name: mc-6bd60ea9e062b99a
 spec:
   modelID: qwen2.5-7b-instruct-awq
-  revision: 9c1f4ae
-  digest: sha256:4f2a...
-  sizeBytes: 5872025600
+  revision: b25037543e9394b818fdfca67ab2a00ecc7dd641
+  digest: sha256:41d12f80b6d62f01e9134f410ab177d907ccb025e41bbb651bd83e8e8304f010
+  sizeBytes: 5582381128
   nodePoolSelector:
     ember.dev/gpu: l4
   retentionPolicy: LRUWithFloor
@@ -459,8 +459,8 @@ Properties the implementation must preserve:
 7. `CacheController` sees a `ModelCache` with no `Ready` node, selects a target node, labels it `cache.ember.dev/<hash>=loading`, and creates a prefetch Job pinned to that node.
 8. The prefetch Job downloads safetensors shards to `/var/lib/ember/models/<hash>.tmp`, verifies each shard digest, atomically renames the directory, and exits. On success `CacheController` sets the node label to `ready` and updates `ModelCache.status`.
 9. `EndpointController` observes a `Ready` node, computes placement, and creates the serving Deployment with `nodeAffinity` toward warm nodes and a toleration for the GPU taint.
-10. Scheduler binds the Pod. The init container verifies cache contents. The engine loads weights from local NVMe.
-11. Readiness probe issues a synthetic one-token completion. Only on success does the Pod become Ready.
+10. Scheduler binds the Pod. The init container verifies cache contents. The engine loads weights from the node-local cache.
+11. The bounded startup probe and subsequent `/health` readiness probe succeed. The real-GPU smoke workflow separately requires a successful chat completion.
 12. Operator observes rollout completion, writes `Ready=True`, `EngineServing`, and the endpoint URL.
 13. Operator creates the KEDA `ScaledObject` bound to the endpoint's queue-depth metric.
 14. UI receives the transition through bounded SSE.
@@ -779,7 +779,7 @@ Runtime phase and conditions come from the CR, metric history comes from Prometh
 | Weight download fails | Job backoff limit | Retryable, exponential backoff, `WeightDownloadFailed` after 3 attempts |
 | No allocatable GPU | Pod `Unschedulable` > 60 s | `Degraded`, `InsufficientGPU` with real node numbers |
 | Model too large for profile | Container exit 137 during load | Terminal `OOMDuringLoad` with the size arithmetic in the message |
-| Engine starts but never serves | Readiness probe with synthetic completion | Retryable twice, then `Degraded` / `WarmupTimeout`, logs retained |
+| Engine starts but never becomes healthy | Bounded startup and `/health` readiness probes | Kubernetes restarts the process; rollout remains `Progressing`, with logs retained for inspection |
 | Spot node preempted | Node `NotReady` / Pod deleted | Deployment reschedules; if the new node is cold, report `ColdStartFallback`, do not silently absorb the latency |
 | Cache evicted during load | Init container check fails | Retryable `CacheEvictedDuringLoad`, prefetch re-triggered |
 | Operator restart mid-provision | Watch re-list | Idempotent reconcile resumes; no duplicate Job or Deployment |
