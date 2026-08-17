@@ -29,6 +29,7 @@ type ModelCacheReconciler struct {
 	ManagedNamespace string
 	Clock            Clock
 	SimulationMode   bool
+	PrefetchImage    string
 }
 
 func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -100,7 +101,7 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				if completionTime != nil {
 					stamp = *completionTime
 				}
-				modelCache.Status.UpsertNode(target, servingv1alpha1.ModelCacheNodeStateReady, modelCache.Spec.SizeBytes, &stamp, nil, "Synthetic cache materialization completed.")
+				modelCache.Status.UpsertNode(target, servingv1alpha1.ModelCacheNodeStateReady, modelCache.Spec.SizeBytes, &stamp, nil, "Verified cache materialization completed.")
 			}
 			modelCache.Status.SetCondition(servingv1alpha1.ConditionReady, metav1.ConditionTrue, servingv1alpha1.ReasonCacheReady, "At least one node has a verified cache entry.", modelCache.Generation, now)
 			modelCache.Status.SetCondition(servingv1alpha1.ConditionProgressing, metav1.ConditionFalse, servingv1alpha1.ReasonRolloutComplete, "ModelCache materialization is complete.", modelCache.Generation, now)
@@ -131,17 +132,17 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	if apierrors.IsNotFound(jobErr) && len(loadingNodeNames) > 0 {
 		target := loadingNodeNames[0]
-		if err := r.direct().Create(ctx, resources.PrefetchJob(modelCache, target, r.SimulationMode)); err != nil && !apierrors.IsAlreadyExists(err) {
+		if err := r.direct().Create(ctx, resources.PrefetchJob(modelCache, target, r.SimulationMode, r.PrefetchImage)); err != nil && !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}
 	}
 
 	if len(loadingNodeNames) > 0 || (jobErr == nil && job.Status.Active > 0) {
 		for _, name := range loadingNodeNames {
-			modelCache.Status.UpsertNode(name, servingv1alpha1.ModelCacheNodeStateLoading, 0, nil, nil, "Synthetic cache materialization in progress.")
+			modelCache.Status.UpsertNode(name, servingv1alpha1.ModelCacheNodeStateLoading, 0, nil, nil, "Cache materialization in progress.")
 		}
-		modelCache.Status.SetCondition(servingv1alpha1.ConditionReady, metav1.ConditionFalse, servingv1alpha1.ReasonLoadingWeights, "Waiting for synthetic cache materialization to finish.", modelCache.Generation, now)
-		modelCache.Status.SetCondition(servingv1alpha1.ConditionProgressing, metav1.ConditionTrue, servingv1alpha1.ReasonLoadingWeights, "Waiting for synthetic cache materialization to finish.", modelCache.Generation, now)
+		modelCache.Status.SetCondition(servingv1alpha1.ConditionReady, metav1.ConditionFalse, servingv1alpha1.ReasonLoadingWeights, "Waiting for cache materialization to finish.", modelCache.Generation, now)
+		modelCache.Status.SetCondition(servingv1alpha1.ConditionProgressing, metav1.ConditionTrue, servingv1alpha1.ReasonLoadingWeights, "Waiting for cache materialization to finish.", modelCache.Generation, now)
 		modelCache.Status.SetCondition(servingv1alpha1.ConditionDegraded, metav1.ConditionFalse, servingv1alpha1.ReasonAsExpected, "ModelCache is progressing.", modelCache.Generation, now)
 		if err := r.updateStatusIfChanged(ctx, modelCache, originalStatus); err != nil {
 			return ctrl.Result{}, err
@@ -164,14 +165,14 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := updateNodeLabel(ctx, r.direct(), target.Name, labelKey, "loading"); err != nil {
 		return ctrl.Result{}, err
 	}
-	modelCache.Status.UpsertNode(target.Name, servingv1alpha1.ModelCacheNodeStateLoading, 0, nil, nil, "Synthetic cache materialization scheduled.")
+	modelCache.Status.UpsertNode(target.Name, servingv1alpha1.ModelCacheNodeStateLoading, 0, nil, nil, "Cache materialization scheduled.")
 	if apierrors.IsNotFound(jobErr) {
-		if err := r.direct().Create(ctx, resources.PrefetchJob(modelCache, target.Name, r.SimulationMode)); err != nil && !apierrors.IsAlreadyExists(err) {
+		if err := r.direct().Create(ctx, resources.PrefetchJob(modelCache, target.Name, r.SimulationMode, r.PrefetchImage)); err != nil && !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}
 	}
-	modelCache.Status.SetCondition(servingv1alpha1.ConditionReady, metav1.ConditionFalse, servingv1alpha1.ReasonLoadingWeights, fmt.Sprintf("Materializing synthetic cache on node %s.", target.Name), modelCache.Generation, now)
-	modelCache.Status.SetCondition(servingv1alpha1.ConditionProgressing, metav1.ConditionTrue, servingv1alpha1.ReasonLoadingWeights, fmt.Sprintf("Materializing synthetic cache on node %s.", target.Name), modelCache.Generation, now)
+	modelCache.Status.SetCondition(servingv1alpha1.ConditionReady, metav1.ConditionFalse, servingv1alpha1.ReasonLoadingWeights, fmt.Sprintf("Materializing cache on node %s.", target.Name), modelCache.Generation, now)
+	modelCache.Status.SetCondition(servingv1alpha1.ConditionProgressing, metav1.ConditionTrue, servingv1alpha1.ReasonLoadingWeights, fmt.Sprintf("Materializing cache on node %s.", target.Name), modelCache.Generation, now)
 	modelCache.Status.SetCondition(servingv1alpha1.ConditionDegraded, metav1.ConditionFalse, servingv1alpha1.ReasonAsExpected, "ModelCache is progressing.", modelCache.Generation, now)
 	if err := r.updateStatusIfChanged(ctx, modelCache, originalStatus); err != nil {
 		return ctrl.Result{}, err

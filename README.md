@@ -6,10 +6,13 @@ The implementation follows [`Ember_Kubernetes_Design_Doc.md`](./Ember_Kubernetes
 
 ## Current milestone
 
-The local Kind milestone establishes the control plane and the Phase 4 product surface:
+The Kind control-plane and product milestones are complete. The real-runtime path is implemented and awaiting measured GKE validation:
 
 - `serving.ember.dev/v1alpha1` `InferenceEndpoint` API.
-- `ModelCache` reconciliation with verified synthetic safetensors materialization.
+- `ModelCache` reconciliation with verified synthetic or immutable real-model materialization.
+- A compile-time allowlist for the nine runtime files in `Qwen/Qwen2.5-7B-Instruct-AWQ` revision `b25037543e9394b818fdfca67ab2a00ecc7dd641`.
+- Streaming per-file download, size and SHA-256 verification, bounded safetensors header validation, fsync, and atomic cache publication.
+- A digest-pinned official `vllm/vllm-openai:v0.8.5` runtime that loads only the read-only local cache with remote access and usage telemetry disabled.
 - Cache state encoded as node labels and required hostname affinity for warm placement.
 - Read-only serving mounts with a non-root cache verification init container.
 - An idempotent Go operator and finalizer-driven cleanup.
@@ -24,6 +27,7 @@ The local Kind milestone establishes the control plane and the Phase 4 product s
 - A React/TypeScript product UI served by the Control API from the same origin.
 - Fleet and endpoint dashboards backed by authoritative CR status, Prometheus time series, Kubernetes API inspection, append-only audit records, and bounded engine logs.
 - OpenAI-compatible chat with SSE streaming and a browser-driven concurrent Load Lab.
+- A GKE overlay plus amd64 Cloud Build, one-L4 Spot cluster automation, and a focused real-runtime smoke test.
 
 Performance numbers in the design document are targets until they are measured on GKE with a real NVIDIA L4 and vLLM. Simulated results are never presented as GPU performance.
 
@@ -64,6 +68,72 @@ make verify
 ```
 
 Docker is used for deterministic Go tooling when a host Go installation is unavailable.
+
+### GCP cost guard
+
+Budget alerts are advisory and can arrive after spend occurs. Before creating a real GPU node pool, install the cloud-side cost guard:
+
+```sh
+make gcp-cost-guard-setup GCP_PROJECT=your-project-id
+```
+
+The setup creates a dedicated keyless service account, a project custom role containing only `container.clusters.update` and `container.clusters.delete`, and a Cloud Tasks queue. After the GKE cluster and L4 node pool exist, arm one-shot deletion tasks:
+
+```sh
+make gcp-cost-guard-arm \
+  GCP_PROJECT=your-project-id \
+  GKE_CLUSTER=ember-gpu \
+  GKE_LOCATION=us-central1-a \
+  GKE_GPU_NODE_POOL=l4-spot
+```
+
+By default, the GPU node pool is deleted after three hours and the whole validation cluster after six hours. Cloud Tasks removes each task after successful execution, so no recurring deletion job remains. Inspect or intentionally remove the timers with:
+
+```sh
+make gcp-cost-guard-status GCP_PROJECT=your-project-id
+make gcp-cost-guard-disarm GCP_PROJECT=your-project-id
+```
+
+For immediate teardown, the destructive target requires the full resource identity as an explicit confirmation:
+
+```sh
+CONFIRM_DESTROY=your-project-id/us-central1-a/ember-gpu \
+  make gcp-cost-guard-destroy GCP_PROJECT=your-project-id
+```
+
+The recommended project budget is USD 50 per month with alerts at 20%, 50%, 80%, and 100%, plus a forecasted 100% alert. Configure it to exclude credits from spend calculations so the USD 300 trial credit does not hide resource consumption. A budget is not a spending cap; the one-shot deletion tasks are the hard runtime protection.
+
+### GKE L4 lifecycle
+
+The GKE scripts require `gcloud`, `gke-gcloud-auth-plugin`, `kubectl`, Docker, and `jq`. Install the Google-authored plugin with `gcloud components install gke-gcloud-auth-plugin` before creating the cluster.
+
+First, after committing the exact source to build, create four Linux amd64 repository images in Artifact Registry. The build script refuses a dirty worktree by default so the image tag identifies the source commit:
+
+```sh
+make gke-build-images GCP_PROJECT=your-project-id
+```
+
+The GKE path creates one zonal Standard cluster with an `e2-standard-4` CPU node and one autoscaled `g2-standard-8` Spot node containing a single NVIDIA L4. This incurs real charges. The cluster script configures the cost guard and arms the three-hour GPU-pool and six-hour cluster deletion tasks before it requests the GPU:
+
+```sh
+make gke-cluster-create GCP_PROJECT=your-project-id
+```
+
+Deploy the real-mode overlay. The script resolves every repository image tag to its Artifact Registry digest before applying it, generates the cluster secrets locally, and installs the digest-verified KEDA release:
+
+```sh
+make gke-deploy GCP_PROJECT=your-project-id
+```
+
+Run the focused hardware smoke test:
+
+```sh
+make gke-real-smoke GCP_PROJECT=your-project-id
+```
+
+The smoke test refreshes the cleanup timers, ensures one L4 node is running, waits up to 30 minutes for the 5.58 GB verified cache and vLLM startup, sends one OpenAI-compatible chat request, labels its wall time as a non-benchmark sample, then deletes the endpoint and resizes the GPU pool to zero. Set `KEEP_RESOURCES=true` only when you intentionally need to inspect the live endpoint; the previously armed TTL tasks still apply.
+
+The real model artifact is the deterministic manifest digest `sha256:41d12f80b6d62f01e9134f410ab177d907ccb025e41bbb651bd83e8e8304f010`. The official amd64 vLLM image is pinned to `sha256:6cf9808ca8810fc6c3fd0451c2e7784fb224590d81f7db338e7eaf3c02a33d33`. No `--trust-remote-code` path is enabled.
 
 ### Kind lifecycle
 
@@ -110,7 +180,8 @@ kubectl -n ember-system port-forward service/ember-gateway 8080:8080
 token=$(
   kubectl -n ember-system get secret ember-jwt-keys \
     -o jsonpath='{.data.private\.key}' |
-  docker run --rm -i -v "$PWD":/workspace -w /workspace golang:1.24 \
+  docker run --rm -i -v "$PWD":/workspace -w /workspace \
+    golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804 \
     go run ./cmd/auth-tool token \
       --private-key-base64-stdin \
       --subject usr_31d2 \

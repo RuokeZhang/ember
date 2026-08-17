@@ -33,6 +33,7 @@ type EndpointReconciler struct {
 	Clock            Clock
 	SimulationMode   bool
 	EnableKEDA       bool
+	PrefetchImage    string
 }
 
 func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -68,8 +69,9 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if r.SimulationMode {
 		profile = catalog.SimulationProfile(profile)
 	}
-	endpoint.Status.Model.ResolvedDigest = model.Digest
-	endpoint.Status.Model.SizeBytes = model.SizeBytes
+	artifact := model.Artifact(r.SimulationMode)
+	endpoint.Status.Model.ResolvedDigest = artifact.Digest
+	endpoint.Status.Model.SizeBytes = artifact.SizeBytes
 	endpoint.Status.WorkloadNamespace = resources.WorkloadNamespaceName(endpoint.UID)
 	endpoint.Status.EndpointURL = resources.EndpointURL(endpoint)
 
@@ -157,11 +159,15 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if desiredReplicas == 0 {
 		r.setReady(endpoint, servingv1alpha1.ReasonScaledToZero, "Endpoint is healthy and scaled to zero after idle timeout.")
 	} else if rolloutReady {
-		r.setReady(endpoint, servingv1alpha1.ReasonEngineServing, "Mock engine reports ready on /healthz after cache verification.")
+		message := "vLLM reports ready on /health after verified model loading."
+		if r.SimulationMode {
+			message = "Mock engine reports ready on /healthz after cache verification."
+		}
+		r.setReady(endpoint, servingv1alpha1.ReasonEngineServing, message)
 	} else if activationRequested {
 		r.setProgressing(endpoint, servingv1alpha1.ReasonScalingFromZero, "Gateway activity triggered scale-from-zero; waiting for the engine to become ready.")
 	} else {
-		r.setProgressing(endpoint, servingv1alpha1.ReasonWarmingEngine, "Waiting for cache verification and mock engine warmup to complete.")
+		r.setProgressing(endpoint, servingv1alpha1.ReasonWarmingEngine, "Waiting for cache verification and engine warmup to complete.")
 	}
 	if err := r.updateStatusIfChanged(ctx, endpoint, originalStatus); err != nil {
 		return ctrl.Result{}, err
@@ -250,7 +256,7 @@ func (r *EndpointReconciler) ensureBaseResources(ctx context.Context, endpoint *
 }
 
 func (r *EndpointReconciler) ensureServingResources(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model, profile catalog.Profile, placement resources.CachePlacement, replicas int32, paused bool) error {
-	for _, obj := range []client.Object{resources.Deployment(endpoint, model, profile, placement, replicas, r.SimulationMode), resources.Service(endpoint, placement.CacheHash)} {
+	for _, obj := range []client.Object{resources.Deployment(endpoint, model, profile, placement, replicas, r.SimulationMode, r.PrefetchImage), resources.Service(endpoint, placement.CacheHash)} {
 		if err := createOrUpdate(ctx, r.direct(), obj); err != nil {
 			return fmt.Errorf("ensure %T: %w", obj, err)
 		}
@@ -293,7 +299,8 @@ func (r *EndpointReconciler) clearActivation(ctx context.Context, endpoint *serv
 }
 
 func (r *EndpointReconciler) ensureModelCache(ctx context.Context, model catalog.Model) (*servingv1alpha1.ModelCache, error) {
-	cache := &servingv1alpha1.ModelCache{ObjectMeta: metav1.ObjectMeta{Name: catalog.ModelCacheNameForModel(model), Labels: map[string]string{resources.LabelManaged: resources.ManagedValue, resources.LabelComponent: "prefetch", resources.LabelCacheHash: catalog.CacheHashForModel(model)}}, Spec: servingv1alpha1.ModelCacheSpec{ModelID: model.ID, Revision: model.Revision, Digest: model.SimulationArtifact.Digest, SizeBytes: model.SimulationArtifact.SizeBytes, NodePoolSelector: catalog.CopySelector(model.NodePoolSelector), RetentionPolicy: servingv1alpha1.RetentionPolicy(catalog.DefaultRetentionPolicy)}}
+	artifact := model.Artifact(r.SimulationMode)
+	cache := &servingv1alpha1.ModelCache{ObjectMeta: metav1.ObjectMeta{Name: catalog.ModelCacheNameForModel(model), Labels: map[string]string{resources.LabelManaged: resources.ManagedValue, resources.LabelComponent: "prefetch", resources.LabelCacheHash: catalog.CacheHashForModel(model)}}, Spec: servingv1alpha1.ModelCacheSpec{ModelID: model.ID, Revision: model.Revision, Digest: artifact.Digest, SizeBytes: artifact.SizeBytes, NodePoolSelector: catalog.CopySelector(model.NodePoolSelector), RetentionPolicy: servingv1alpha1.RetentionPolicy(catalog.DefaultRetentionPolicy)}}
 	cache.Default()
 	if err := createOrUpdate(ctx, r.direct(), cache); err != nil {
 		return nil, err

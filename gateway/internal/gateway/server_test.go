@@ -41,7 +41,7 @@ func TestGatewayRequiresJWTAndInjectsOwner(t *testing.T) {
 
 	request := authenticatedRequest(t, privateKey, "owner-a", http.MethodPost, "/v1/endpoints", `{
 		"modelID":"qwen2.5-7b-instruct-awq",
-		"revision":"9c1f4ae",
+		"revision":"b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		"profile":"standard",
 		"maxReplicas":3,
 		"targetQueueDepth":4,
@@ -77,7 +77,7 @@ func TestGatewayAcceptsControlPlaneEndpointID(t *testing.T) {
 	request := authenticatedRequest(t, privateKey, "owner-a", http.MethodPost, "/v1/endpoints", `{
 		"endpointID":"ep-control123",
 		"modelID":"qwen2.5-7b-instruct-awq",
-		"revision":"9c1f4ae",
+		"revision":"b25037543e9394b818fdfca67ab2a00ecc7dd641",
 		"profile":"standard",
 		"maxReplicas":1,
 		"targetQueueDepth":4,

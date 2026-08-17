@@ -42,7 +42,7 @@ func TestDeploymentSecurityAndCacheVerification(t *testing.T) {
 	profile, _ := catalog.LookupProfile("tp2")
 	placement := CachePlacement{NodeName: "node-a", CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.SimulationArtifact.Digest, ExpectedSize: model.SimulationArtifact.SizeBytes}
 
-	deployment := Deployment(endpoint, model, profile, placement, 1, true)
+	deployment := Deployment(endpoint, model, profile, placement, 1, true, PrefetchImage)
 	container := deployment.Spec.Template.Spec.Containers[0]
 	initContainer := deployment.Spec.Template.Spec.InitContainers[0]
 
@@ -80,13 +80,56 @@ func TestDeploymentSecurityAndCacheVerification(t *testing.T) {
 	if !containsEnv(container.Env, "TOKEN_DELAY", SimulationTokenDelay) {
 		t.Fatalf("expected deterministic simulation token delay, got %#v", container.Env)
 	}
+	if container.Image != model.SimulationImage || len(container.Args) != 0 {
+		t.Fatalf("expected unchanged mock runtime, image=%q args=%#v", container.Image, container.Args)
+	}
+}
+
+func TestRealDeploymentUsesPinnedOfflineVLLMRuntime(t *testing.T) {
+	endpoint := validEndpoint()
+	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
+	profile, _ := catalog.LookupProfile("standard")
+	placement := CachePlacement{NodeName: "node-a", CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.Digest, ExpectedSize: model.SizeBytes}
+
+	deployment := Deployment(endpoint, model, profile, placement, 1, false, "registry.example/ember-prefetch@sha256:1234")
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if container.Image != model.EngineImage || !strings.Contains(container.Image, "@sha256:") {
+		t.Fatalf("expected digest-pinned real runtime, got %q", container.Image)
+	}
+	for _, expected := range []string{"--model", "/models/cache", "--served-model-name", model.ServedModelName, "--tensor-parallel-size", "1", "--quantization", "awq", "--load-format", "safetensors", "--max-model-len", "32768"} {
+		if !contains(container.Args, expected) {
+			t.Fatalf("real runtime args missing %q: %#v", expected, container.Args)
+		}
+	}
+	if contains(container.Args, "--trust-remote-code") {
+		t.Fatalf("real runtime must not trust remote model code: %#v", container.Args)
+	}
+	for _, env := range []struct {
+		name  string
+		value string
+	}{
+		{name: "HF_HUB_OFFLINE", value: "1"},
+		{name: "TRANSFORMERS_OFFLINE", value: "1"},
+		{name: "VLLM_NO_USAGE_STATS", value: "1"},
+		{name: "HOME", value: "/tmp"},
+	} {
+		if !containsEnv(container.Env, env.name, env.value) {
+			t.Fatalf("real runtime env missing %s=%s: %#v", env.name, env.value, container.Env)
+		}
+	}
+	if container.StartupProbe == nil || container.StartupProbe.HTTPGet.Path != "/health" {
+		t.Fatalf("expected bounded vLLM startup probe, got %#v", container.StartupProbe)
+	}
+	if container.ReadinessProbe.HTTPGet.Path != "/health" || container.LivenessProbe.HTTPGet.Path != "/health" {
+		t.Fatalf("expected vLLM health probes, readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+	}
 }
 
 func TestPrefetchJobSecurityAndArgs(t *testing.T) {
 	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
 	cache := &servingv1alpha1.ModelCache{ObjectMeta: metav1.ObjectMeta{Name: catalog.ModelCacheNameForModel(model), UID: types.UID("cache-uid")}, Spec: servingv1alpha1.ModelCacheSpec{ModelID: model.ID, Revision: model.Revision, Digest: model.SimulationArtifact.Digest, SizeBytes: model.SimulationArtifact.SizeBytes}}
 
-	job := PrefetchJob(cache, "node-a", true)
+	job := PrefetchJob(cache, "node-a", true, PrefetchImage)
 	if job.Spec.Template.Spec.ServiceAccountName != PrefetchServiceAccountName {
 		t.Fatalf("expected prefetch SA %q, got %q", PrefetchServiceAccountName, job.Spec.Template.Spec.ServiceAccountName)
 	}
@@ -124,6 +167,15 @@ func TestPrefetchJobSecurityAndArgs(t *testing.T) {
 	}
 	if len(job.OwnerReferences) != 1 || job.OwnerReferences[0].Kind != "ModelCache" {
 		t.Fatalf("expected model cache owner reference, got %#v", job.OwnerReferences)
+	}
+
+	realCache := cache.DeepCopy()
+	realCache.Spec.Digest = model.Digest
+	realCache.Spec.SizeBytes = model.SizeBytes
+	realJob := PrefetchJob(realCache, "node-a", false, "registry.example/ember-prefetch@sha256:1234")
+	realArgs := realJob.Spec.Template.Spec.Containers[0].Args
+	if contains(realArgs, "--synthetic") || !contains(realArgs, "--model-id") || !contains(realArgs, model.ID) || !contains(realArgs, "--revision") || !contains(realArgs, model.Revision) {
+		t.Fatalf("expected immutable real prefetch args, got %#v", realArgs)
 	}
 }
 
@@ -219,7 +271,8 @@ func containsEnv(values []corev1.EnvVar, name, value string) bool {
 }
 
 func validEndpoint() *servingv1alpha1.InferenceEndpoint {
-	endpoint := &servingv1alpha1.InferenceEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "ep-1", Namespace: servingv1alpha1.EmberSystemNamespace, UID: types.UID("12345678-1234-1234-1234-1234567890ab")}, Spec: servingv1alpha1.InferenceEndpointSpec{OwnerID: "usr_31d2", Model: servingv1alpha1.InferenceEndpointModelSpec{ID: "qwen2.5-7b-instruct-awq", Revision: "9c1f4ae"}, Profile: servingv1alpha1.ProfileStandard, Scaling: servingv1alpha1.InferenceEndpointScalingSpec{MinReplicas: 0, MaxReplicas: 3, TargetQueueDepth: 4, IdleTimeoutSeconds: 900}, Placement: servingv1alpha1.InferenceEndpointPlacementSpec{CachePreference: servingv1alpha1.CachePreferencePreferred, MaxColdStartFallbackSeconds: 120}}}
+	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
+	endpoint := &servingv1alpha1.InferenceEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "ep-1", Namespace: servingv1alpha1.EmberSystemNamespace, UID: types.UID("12345678-1234-1234-1234-1234567890ab")}, Spec: servingv1alpha1.InferenceEndpointSpec{OwnerID: "usr_31d2", Model: servingv1alpha1.InferenceEndpointModelSpec{ID: model.ID, Revision: model.Revision}, Profile: servingv1alpha1.ProfileStandard, Scaling: servingv1alpha1.InferenceEndpointScalingSpec{MinReplicas: 0, MaxReplicas: 3, TargetQueueDepth: 4, IdleTimeoutSeconds: 900}, Placement: servingv1alpha1.InferenceEndpointPlacementSpec{CachePreference: servingv1alpha1.CachePreferencePreferred, MaxColdStartFallbackSeconds: 120}}}
 	endpoint.Default()
 	return endpoint
 }

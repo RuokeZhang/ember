@@ -15,12 +15,14 @@ func TestDeploymentMatchesLocalImageContract(t *testing.T) {
 	for _, required := range []string{
 		"image: ember-operator:dev",
 		"- /ember-operator",
-		"- --simulation-mode",
 		"- --enable-keda",
 		"serviceAccountName: ember-operator-manager",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("deployment missing %q", required)
 		}
+	}
+	if strings.Contains(text, "--simulation-mode") {
+		t.Fatal("base deployment must default to the real runtime")
 	}
 }

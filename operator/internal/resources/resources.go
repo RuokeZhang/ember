@@ -295,7 +295,7 @@ func GatewayLogRoleBinding(endpoint *servingv1alpha1.InferenceEndpoint) *rbacv1.
 	}
 }
 
-func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model, profile catalog.Profile, placement CachePlacement, replicas int32, simulationMode bool) *appsv1.Deployment {
+func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model, profile catalog.Profile, placement CachePlacement, replicas int32, simulationMode bool, prefetchImage string) *appsv1.Deployment {
 	runAsUser := int64(65532)
 	runAsGroup := int64(65532)
 	replicasCopy := replicas
@@ -304,15 +304,52 @@ func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model
 	directoryOrCreate := corev1.HostPathDirectoryOrCreate
 	labels := LabelsForObject(endpoint)
 	labels[LabelCacheHash] = placement.CacheHash
-	engineEnv := []corev1.EnvVar{
-		{Name: "MODEL_ID", Value: model.ID},
-		{Name: "MODEL_REVISION", Value: model.Revision},
-		{Name: "MODEL_PATH", Value: "/models/cache"},
-		{Name: "LOAD_DELAY", Value: fmt.Sprintf("%ds", model.LoadDelaySeconds)},
-		{Name: "MOCK_RESPONSE", Value: "Ember reconciled this GPU inference endpoint successfully."},
+	prefetchImage = configuredPrefetchImage(prefetchImage)
+	engineImage := model.EngineImageForMode(simulationMode)
+	healthPath := "/health"
+	engineArgs := []string{
+		"--model", "/models/cache",
+		"--served-model-name", model.ServedModelName,
+		"--host", "0.0.0.0",
+		"--port", strconv.Itoa(EnginePort),
+		"--tensor-parallel-size", strconv.Itoa(int(profile.GPUCount)),
+		"--quantization", model.Quantization,
+		"--load-format", "safetensors",
+		"--max-model-len", strconv.Itoa(int(model.MaxModelLength)),
+		"--gpu-memory-utilization", "0.90",
 	}
+	engineEnv := []corev1.EnvVar{
+		{Name: "HOME", Value: "/tmp"},
+		{Name: "TMPDIR", Value: "/tmp"},
+		{Name: "HF_HOME", Value: "/tmp/huggingface"},
+		{Name: "HF_HUB_OFFLINE", Value: "1"},
+		{Name: "TRANSFORMERS_OFFLINE", Value: "1"},
+		{Name: "XDG_CACHE_HOME", Value: "/tmp/cache"},
+		{Name: "TORCH_HOME", Value: "/tmp/torch"},
+		{Name: "CUDA_CACHE_PATH", Value: "/tmp/cuda"},
+		{Name: "VLLM_CACHE_ROOT", Value: "/tmp/vllm"},
+		{Name: "VLLM_NO_USAGE_STATS", Value: "1"},
+		{Name: "DO_NOT_TRACK", Value: "1"},
+	}
+	var startupProbe *corev1.Probe
 	if simulationMode {
-		engineEnv = append(engineEnv, corev1.EnvVar{Name: "TOKEN_DELAY", Value: SimulationTokenDelay})
+		healthPath = "/healthz"
+		engineArgs = nil
+		engineEnv = []corev1.EnvVar{
+			{Name: "MODEL_ID", Value: model.ID},
+			{Name: "MODEL_REVISION", Value: model.Revision},
+			{Name: "MODEL_PATH", Value: "/models/cache"},
+			{Name: "LOAD_DELAY", Value: fmt.Sprintf("%ds", model.LoadDelaySeconds)},
+			{Name: "MOCK_RESPONSE", Value: "Ember reconciled this GPU inference endpoint successfully."},
+			{Name: "TOKEN_DELAY", Value: SimulationTokenDelay},
+		}
+	} else {
+		startupProbe = &corev1.Probe{
+			ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: healthPath, Port: intstr.FromInt(EnginePort)}},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 90,
+		}
 	}
 
 	podSpec := corev1.PodSpec{
@@ -333,7 +370,7 @@ func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model
 		},
 		InitContainers: []corev1.Container{{
 			Name:            "verify-cache",
-			Image:           PrefetchImage,
+			Image:           prefetchImage,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Args: []string{
 				"--verify-only",
@@ -357,19 +394,21 @@ func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model
 		}},
 		Containers: []corev1.Container{{
 			Name:            EngineName,
-			Image:           model.EngineImage,
+			Image:           engineImage,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: EnginePort}},
+			Args:            engineArgs,
 			Env:             engineEnv,
+			StartupProbe:    startupProbe,
 			ReadinessProbe: &corev1.Probe{
-				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(EnginePort)}},
+				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: healthPath, Port: intstr.FromInt(EnginePort)}},
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
 				TimeoutSeconds:      2,
 				FailureThreshold:    12,
 			},
 			LivenessProbe: &corev1.Probe{
-				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(EnginePort)}},
+				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: healthPath, Port: intstr.FromInt(EnginePort)}},
 				InitialDelaySeconds: 15,
 				PeriodSeconds:       10,
 				TimeoutSeconds:      2,
@@ -515,13 +554,14 @@ func ModelCacheLabels(modelCache *servingv1alpha1.ModelCache) map[string]string 
 	}
 }
 
-func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simulationMode bool) *batchv1.Job {
+func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simulationMode bool, prefetchImage string) *batchv1.Job {
 	falseValue := false
 	rootUser := int64(0)
 	rootGroup := int64(0)
 	runAsUser := cachefs.RuntimeUserID
 	runAsGroup := cachefs.RuntimeGroupID
 	cacheHash := catalog.CacheHash(modelCache.Spec.ModelID, modelCache.Spec.Revision)
+	prefetchImage = configuredPrefetchImage(prefetchImage)
 	directoryOrCreate := corev1.HostPathDirectoryOrCreate
 	labels := ModelCacheLabels(modelCache)
 	labels["ember.dev/node-name"] = nodeName
@@ -531,8 +571,11 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 		"--expected-digest", modelCache.Spec.Digest,
 		"--expected-size", strconv.FormatInt(modelCache.Spec.SizeBytes, 10),
 	}
+
 	if simulationMode {
 		args = append(args, "--synthetic")
+	} else {
+		args = append(args, "--model-id", modelCache.Spec.ModelID, "--revision", modelCache.Spec.Revision)
 	}
 
 	return &batchv1.Job{
@@ -567,7 +610,7 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 					SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: ptr(true), RunAsUser: &runAsUser, RunAsGroup: &runAsGroup, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 					InitContainers: []corev1.Container{{
 						Name:            "prepare-cache-root",
-						Image:           PrefetchImage,
+						Image:           prefetchImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Args:            []string{"--prepare-root", "--root", catalog.CacheRoot},
 						SecurityContext: &corev1.SecurityContext{RunAsNonRoot: ptr(false), RunAsUser: &rootUser, RunAsGroup: &rootGroup, AllowPrivilegeEscalation: ptr(false), ReadOnlyRootFilesystem: ptr(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"CHOWN"}}, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
@@ -576,7 +619,7 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 					}},
 					Containers: []corev1.Container{{
 						Name:            "prefetch",
-						Image:           PrefetchImage,
+						Image:           prefetchImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Args:            args,
 						SecurityContext: &corev1.SecurityContext{RunAsNonRoot: ptr(true), AllowPrivilegeEscalation: ptr(false), ReadOnlyRootFilesystem: ptr(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
@@ -588,6 +631,13 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 			},
 		},
 	}
+}
+
+func configuredPrefetchImage(image string) string {
+	if strings.TrimSpace(image) == "" {
+		return PrefetchImage
+	}
+	return image
 }
 
 func PrefetchJobName(modelCache *servingv1alpha1.ModelCache) string {
