@@ -9,6 +9,7 @@ resources:
   - ../../gateway/config
   - ../../controlapi/config
   - ../../monitoring/config
+  - control-api-dns-network-policy.yaml
 patches:
   - target:
       group: apps

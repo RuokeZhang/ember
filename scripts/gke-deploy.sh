@@ -75,6 +75,10 @@ fi
   --project="${PROJECT_ID}" \
   --location="${CLUSTER_LOCATION}"
 
+dns_service_ip=$("${KUBECTL}" -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}')
+[[ "${dns_service_ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "could not resolve the cluster DNS Service IPv4 address"
+dns_service_cidr="${dns_service_ip}/32"
+
 operator_image=$(resolve_image ember-operator)
 prefetch_image=$(resolve_image ember-prefetch)
 gateway_image=$(resolve_image ember-gateway)
@@ -91,15 +95,21 @@ trap cleanup EXIT
     -e "s|image: ember-operator:dev|image: ${operator_image}|g" \
     -e "s|image: ember-gateway:dev|image: ${gateway_image}|g" \
     -e "s|image: ember-control-api:dev|image: ${control_api_image}|g" \
-    -e "s|--prefetch-image=EMBER_PREFETCH_IMAGE|--prefetch-image=${prefetch_image}|g" >"${rendered}"
+    -e "s|--prefetch-image=EMBER_PREFETCH_IMAGE|--prefetch-image=${prefetch_image}|g" \
+    -e "s|GKE_DNS_CIDR|${dns_service_cidr}|g" >"${rendered}"
 
-if grep -Eq 'image: ember-(operator|gateway|control-api):dev|EMBER_PREFETCH_IMAGE' "${rendered}"; then
+if grep -Eq 'image: ember-(operator|gateway|control-api):dev|EMBER_PREFETCH_IMAGE|GKE_DNS_CIDR' "${rendered}"; then
   die "rendered manifest still contains local image placeholders"
 fi
 
 "${KUBECTL}" apply -f deploy/gke/namespace.yaml
 make cluster-auth
 ./scripts/install-keda.sh
+postgres_cluster_ip=$("${KUBECTL}" -n ember-system get service ember-postgres -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+if [[ -n "${postgres_cluster_ip}" && "${postgres_cluster_ip}" != "None" ]]; then
+  echo "Recreating ember-postgres as a headless Service."
+  "${KUBECTL}" -n ember-system delete service ember-postgres --wait=true
+fi
 "${KUBECTL}" apply -f "${rendered}"
 
 "${KUBECTL}" -n ember-system rollout status statefulset/ember-postgres --timeout=5m
