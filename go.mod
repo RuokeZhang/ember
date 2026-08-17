@@ -3,7 +3,7 @@ module github.com/RuokeZhang/ember
 go 1.25.0
 
 require (
-	github.com/jackc/pgx/v5 v5.7.2
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/prometheus/client_golang v1.19.1
 	golang.org/x/time v0.7.0
 	google.golang.org/grpc v1.82.1
@@ -51,7 +51,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
