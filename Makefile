@@ -1,4 +1,4 @@
-GO_IMAGE ?= golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804
+GO_IMAGE ?= golang:1.25@sha256:cbff9d1a9041b316010f2da6b701b6c0d597718cb90928c85eb597334a0d23d4
 NODE_IMAGE ?= node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
 OPERATOR_IMAGE ?= ember-operator:dev
 MOCK_ENGINE_IMAGE ?= ember-mock-engine:dev

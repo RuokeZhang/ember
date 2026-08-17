@@ -3,7 +3,7 @@ set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
 PORT=${PORT:-18080}
-GO_IMAGE=${GO_IMAGE:-golang:1.24}
+GO_IMAGE=${GO_IMAGE:-golang:1.25@sha256:cbff9d1a9041b316010f2da6b701b6c0d597718cb90928c85eb597334a0d23d4}
 NAME=ep-smoke
 WARM_NAME=ep-smoke-warm
 SYSTEM_NAMESPACE=ember-system
