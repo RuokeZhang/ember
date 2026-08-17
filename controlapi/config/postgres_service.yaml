@@ -8,6 +8,7 @@ metadata:
     app.kubernetes.io/part-of: ember
     component: database
 spec:
+  clusterIP: None
   selector:
     app.kubernetes.io/name: ember-postgres
     component: database

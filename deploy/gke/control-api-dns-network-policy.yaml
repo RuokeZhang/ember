@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ember-control-api-gke-dns
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/part-of: ember
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ember-control-api
+      component: control-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: GKE_DNS_CIDR
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
