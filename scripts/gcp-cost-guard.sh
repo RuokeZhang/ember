@@ -14,6 +14,7 @@ QUEUE_NAME=${QUEUE_NAME:-ember-cost-guard}
 SERVICE_ACCOUNT_NAME=${SERVICE_ACCOUNT_NAME:-ember-cost-guard}
 ROLE_ID=${ROLE_ID:-emberCostGuard}
 DRY_RUN=${DRY_RUN:-false}
+ALLOW_MISSING_GPU_POOL=${ALLOW_MISSING_GPU_POOL:-false}
 
 usage() {
   cat <<'EOF'
@@ -36,6 +37,8 @@ Environment:
   CLUSTER_TTL_HOURS   Default: 6
   TASKS_LOCATION      Defaults to the cluster's region.
   DRY_RUN             Set to true to print mutations without running them.
+  ALLOW_MISSING_GPU_POOL
+                      Permit arming before the GPU pool is created. Default: false.
 EOF
 }
 
@@ -46,6 +49,10 @@ die() {
 
 is_dry_run() {
   [[ "${DRY_RUN}" == "true" || "${DRY_RUN}" == "1" ]]
+}
+
+allow_missing_gpu_pool() {
+  [[ "${ALLOW_MISSING_GPU_POOL}" == "true" || "${ALLOW_MISSING_GPU_POOL}" == "1" ]]
 }
 
 print_command() {
@@ -87,6 +94,10 @@ resolve_config() {
   validate_positive_integer GPU_TTL_HOURS "${GPU_TTL_HOURS}"
   validate_positive_integer CLUSTER_TTL_HOURS "${CLUSTER_TTL_HOURS}"
   ((CLUSTER_TTL_HOURS > GPU_TTL_HOURS)) || die "CLUSTER_TTL_HOURS must exceed GPU_TTL_HOURS"
+  case "${ALLOW_MISSING_GPU_POOL}" in
+  true | false | 1 | 0) ;;
+  *) die "ALLOW_MISSING_GPU_POOL must be true or false" ;;
+  esac
 
   if [[ -z "${TASKS_LOCATION}" ]]; then
     if [[ "${CLUSTER_LOCATION}" =~ -[a-z]$ ]]; then
@@ -268,10 +279,12 @@ arm_guard() {
     "${GCLOUD}" container clusters describe "${CLUSTER_NAME}" \
       --project="${PROJECT_ID}" \
       --location="${CLUSTER_LOCATION}" >/dev/null
-    "${GCLOUD}" container node-pools describe "${GPU_NODE_POOL}" \
-      --project="${PROJECT_ID}" \
-      --cluster="${CLUSTER_NAME}" \
-      --location="${CLUSTER_LOCATION}" >/dev/null
+    if ! allow_missing_gpu_pool; then
+      "${GCLOUD}" container node-pools describe "${GPU_NODE_POOL}" \
+        --project="${PROJECT_ID}" \
+        --cluster="${CLUSTER_NAME}" \
+        --location="${CLUSTER_LOCATION}" >/dev/null
+    fi
   fi
 
   local stamp gpu_task cluster_task gpu_delete_at cluster_delete_at

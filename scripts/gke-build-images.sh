@@ -74,6 +74,7 @@ fi
 registry="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}"
 "${GCLOUD}" builds submit . \
   --project="${PROJECT_ID}" \
+  --region="${REGION}" \
   --config=deploy/gke/cloudbuild.yaml \
   --substitutions="_REGISTRY=${registry},_IMAGE_TAG=${IMAGE_TAG}"
 
