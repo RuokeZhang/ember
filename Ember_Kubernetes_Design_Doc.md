@@ -5,7 +5,7 @@
 **Date:** August 15, 2026
 **Target:** Portfolio project. Kubernetes control plane on GKE; product surface hosted on Replit.
 
-**Implementation status:** The repository implements the Kind control plane and Phase 4 product surface plus the real-runtime transition: immutable Qwen file manifests, streaming verified prefetch, a digest-pinned official vLLM image, a real-mode GKE overlay, amd64 Cloud Build, one-L4 Spot cluster automation, and automatic cleanup. Kind still uses the in-repository fake GPU device plugin, synthetic safetensors, and mock OpenAI-compatible engine. Real NVIDIA L4 measurements, Replit hosting, and the optional Phase 5 items remain future validation work; no simulated timing is presented as real GPU performance.
+**Implementation status:** The repository implements the Kind control plane and Phase 4 product surface plus the real-runtime transition: immutable Qwen file manifests, streaming verified prefetch, a digest-pinned official vLLM image, a real-mode GKE overlay, amd64 Cloud Build, one-L4 Spot cluster automation, automatic cleanup, and a Replit build profile for the public Web + Control API service. Kind still uses the in-repository fake GPU device plugin, synthetic safetensors, and mock OpenAI-compatible engine. Real NVIDIA L4 measurements, the public HTTPS Gateway edge and live Replit deployment, and the optional Phase 5 items remain future validation work; no simulated timing is presented as real GPU performance.
 
 ---
 
