@@ -1,0 +1,11 @@
+entrypoint = "controlapi/cmd/control-api/main.go"
+modules = ["go-1.25", "nodejs-22"]
+run = "bash scripts/replit-build.sh && bash scripts/replit-run.sh"
+
+[deployment]
+build = "bash scripts/replit-build.sh"
+run = "bash scripts/replit-run.sh"
+
+[[ports]]
+localPort = 8080
+externalPort = 80

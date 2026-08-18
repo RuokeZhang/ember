@@ -22,7 +22,7 @@ GO_DOCKER = docker run --rm --user "$$(id -u):$$(id -g)" -e GOMODCACHE=/workspac
 NODE_DOCKER = docker run --rm --user "$$(id -u):$$(id -g)" -e npm_config_cache=/tmp/npm-cache -v "$(CURDIR)":/workspace -w /workspace/web $(NODE_IMAGE)
 COST_GUARD_ENV = PROJECT_ID="$(GCP_PROJECT)" CLUSTER_NAME="$(GKE_CLUSTER)" CLUSTER_LOCATION="$(GKE_LOCATION)" GPU_NODE_POOL="$(GKE_GPU_NODE_POOL)" GPU_TTL_HOURS="$(GPU_TTL_HOURS)" CLUSTER_TTL_HOURS="$(CLUSTER_TTL_HOURS)"
 
-.PHONY: fmt tidy test vet build web-install web-test web-build scripts-check verify images manifests kind-create kind-load cluster-auth kind-auth keda-install deploy sample kind-smoke control-api-smoke undeploy gke-cluster-create gke-cluster-status gke-build-images gke-deploy gke-real-smoke gcp-cost-guard-setup gcp-cost-guard-arm gcp-cost-guard-status gcp-cost-guard-disarm gcp-cost-guard-destroy
+.PHONY: fmt tidy test vet build web-install web-test web-build replit-build replit-run scripts-check verify images manifests kind-create kind-load cluster-auth kind-auth keda-install deploy sample kind-smoke control-api-smoke undeploy gke-cluster-create gke-cluster-status gke-build-images gke-deploy gke-real-smoke gcp-cost-guard-setup gcp-cost-guard-arm gcp-cost-guard-status gcp-cost-guard-disarm gcp-cost-guard-destroy
 
 fmt:
 	$(GO_DOCKER) sh -ec 'gofmt -w $$(find . -name "*.go" -not -path "./.cache/*")'
@@ -47,6 +47,12 @@ web-test: web-install
 
 web-build: web-install
 	$(NODE_DOCKER) npm run build
+
+replit-build:
+	bash scripts/replit-build.sh
+
+replit-run:
+	bash scripts/replit-run.sh
 
 scripts-check:
 	bash -n scripts/*.sh

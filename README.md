@@ -28,6 +28,7 @@ The Kind control-plane and product milestones are complete. The real-runtime pat
 - Fleet and endpoint dashboards backed by authoritative CR status, Prometheus time series, Kubernetes API inspection, append-only audit records, and bounded engine logs.
 - OpenAI-compatible chat with SSE streaming and a browser-driven concurrent Load Lab.
 - A GKE overlay plus amd64 Cloud Build, one-L4 Spot cluster automation, and a focused real-runtime smoke test.
+- A Replit build profile for the same-origin Web + Control API product surface.
 
 Performance numbers in the design document are targets until they are measured on GKE with a real NVIDIA L4 and vLLM. Simulated results are never presented as GPU performance.
 
@@ -52,6 +53,27 @@ The dashboard does not invent data:
 | Engine output | Bounded and redacted Pod logs |
 
 The GPU allocation meter and browser-observed TTFT samples are explanatory demo evidence, not billing data or real-GPU benchmark claims.
+
+## Replit product surface
+
+Replit hosts the public Web + Control API service and uses a Replit SQL Database. The operator, Gateway, Prometheus, and GPU workloads remain on Kubernetes; the in-cluster Postgres remains available only for the Kind and GKE smoke paths. The Replit service never receives Kubernetes credentials.
+
+The root [`.replit`](./.replit) file uses the reviewed Replit Go 1.25 and Node.js 22 modules, invokes the repository-owned build and run scripts, builds the React application plus the static Go Control API binary, and publishes the single HTTP service on internal port `8080`. Use an Autoscale or Reserved VM deployment, not a Static deployment.
+
+Before importing this repository into Replit:
+
+1. Provide an externally reachable HTTPS endpoint for `ember-gateway`. The current GKE overlay intentionally leaves the Gateway as a `ClusterIP`; Replit cannot reach it until a separate TLS edge is configured.
+2. Add a Replit SQL Database. Replit supplies its connection through `DATABASE_URL`, which Ember reads directly.
+3. Configure the following deployment values. Store the signing key only in Replit Secrets and never commit it.
+
+| Name | Required | Value |
+|---|---|---|
+| `EMBER_GATEWAY_URL` | Yes | Public `https://` URL for the owner-enforcing in-cluster Gateway |
+| `EMBER_GATEWAY_PRIVATE_KEY_BASE64` | Yes | Base64 encoding of the raw 64-byte Ed25519 private key whose public key is mounted by the Gateway |
+| `EMBER_GATEWAY_AUDIENCE` | No | JWT audience; defaults to `ember-gateway` |
+| `DATABASE_URL` | Yes | Supplied automatically by the attached Replit development or production database |
+
+The application refuses to start on Replit if the Gateway URL is not HTTPS, the signing-key secret is absent, or secure session cookies are disabled. After Preview responds successfully, publish the service and verify `/readyz` before exercising endpoint creation or inference.
 
 ## Safety
 
