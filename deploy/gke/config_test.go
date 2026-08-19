@@ -85,9 +85,25 @@ func TestControlAPINetworkPoliciesRestrictEgress(t *testing.T) {
 		corev1.ProtocolUDP: 53,
 		corev1.ProtocolTCP: 53,
 	})
-	if len(gkeDNS.To) != 1 || gkeDNS.To[0].IPBlock == nil || gkeDNS.To[0].IPBlock.CIDR != "GKE_DNS_CIDR" ||
-		gkeDNS.To[0].NamespaceSelector != nil || gkeDNS.To[0].PodSelector != nil {
-		t.Fatalf("GKE DNS policy must allow only the injected resolver CIDR: %#v", gkeDNS.To)
+	if len(gkeDNS.To) != 2 {
+		t.Fatalf("GKE DNS policy must allow the resolver CIDR and NodeLocal DNS: %#v", gkeDNS.To)
+	}
+	resolver := gkeDNS.To[0]
+	if resolver.IPBlock == nil || resolver.IPBlock.CIDR != "GKE_DNS_CIDR" ||
+		resolver.NamespaceSelector != nil || resolver.PodSelector != nil {
+		t.Fatalf("unexpected GKE resolver peer: %#v", resolver)
+	}
+	nodeLocal := gkeDNS.To[1]
+	if nodeLocal.IPBlock != nil ||
+		nodeLocal.NamespaceSelector == nil ||
+		!reflect.DeepEqual(nodeLocal.NamespaceSelector.MatchLabels, map[string]string{
+			"kubernetes.io/metadata.name": "kube-system",
+		}) ||
+		nodeLocal.PodSelector == nil ||
+		!reflect.DeepEqual(nodeLocal.PodSelector.MatchLabels, map[string]string{
+			"k8s-app": "node-local-dns",
+		}) {
+		t.Fatalf("unexpected GKE NodeLocal DNS peer: %#v", nodeLocal)
 	}
 }
 
