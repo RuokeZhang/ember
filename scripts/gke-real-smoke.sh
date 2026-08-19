@@ -114,6 +114,16 @@ PROJECT_ID="${PROJECT_ID}" \
   CLUSTER_LOCATION="${CLUSTER_LOCATION}" \
   GPU_NODE_POOL="${GPU_NODE_POOL}" \
   ./scripts/gcp-cost-guard.sh arm
+if gateways=$("${KUBECTL}" get gateways.gateway.networking.k8s.io -A -o json 2>/dev/null) &&
+  jq -e 'any(.items[]?; .spec.gatewayClassName == "gke-l7-global-external-managed")' \
+    <<<"${gateways}" >/dev/null; then
+  PROJECT_ID="${PROJECT_ID}" \
+    CLUSTER_NAME="${CLUSTER_NAME}" \
+    CLUSTER_LOCATION="${CLUSTER_LOCATION}" \
+    GPU_NODE_POOL="${GPU_NODE_POOL}" \
+    ./scripts/gcp-cost-guard.sh keep-cluster
+  echo "Public Gateway detected; retained the GPU-pool timer but removed the cluster deletion timer."
+fi
 "${GCLOUD}" container clusters resize "${CLUSTER_NAME}" \
   --node-pool="${GPU_NODE_POOL}" \
   --num-nodes=1 \

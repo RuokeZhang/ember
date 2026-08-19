@@ -1,0 +1,27 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ember-public
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-public-gateway
+    app.kubernetes.io/part-of: ember
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: EMBER_GATEWAY_IP_NAME
+  listeners:
+    - name: https
+      hostname: EMBER_GATEWAY_HOST
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute
+        namespaces:
+          from: Same
+      tls:
+        mode: Terminate
+        options:
+          networking.gke.io/pre-shared-certs: EMBER_GATEWAY_CERTIFICATE

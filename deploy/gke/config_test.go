@@ -168,6 +168,115 @@ func TestClusterScriptArmsCleanupBeforeGPUAndAllowsDriverDownload(t *testing.T) 
 	}
 }
 
+func TestClusterScriptEnablesGatewayAPI(t *testing.T) {
+	data, err := os.ReadFile("../../scripts/gke-cluster.sh")
+	if err != nil {
+		t.Fatalf("read GKE cluster script: %v", err)
+	}
+	text := string(data)
+	if strings.Count(text, "--gateway-api=standard") != 2 {
+		t.Fatalf("expected Gateway API enablement for new and existing clusters, got:\n%s", text)
+	}
+	for _, required := range []string{
+		".networkConfig.gatewayApiConfig.channel // empty",
+		`"${channel}" == "CHANNEL_STANDARD"`,
+		".addonsConfig.httpLoadBalancing.disabled // false",
+		"ensure_gateway_api",
+		"preserve_cluster_if_public_gateway_exists",
+		"cost_guard keep-cluster",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("GKE cluster script missing Gateway prerequisite %q", required)
+		}
+	}
+	enable := strings.LastIndex(text, "\n  ensure_gateway_api\n")
+	credentials := strings.LastIndex(text, `container clusters get-credentials`)
+	if enable < 0 || credentials < 0 || enable > credentials {
+		t.Fatal("Gateway API must be enabled before obtaining credentials for the configured cluster")
+	}
+}
+
+func TestCostGuardCanKeepClusterWithoutRemovingGPUDeadline(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "gcloud.log")
+	gcloudPath := filepath.Join(tempDir, "gcloud")
+	fakeGcloud := `#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${GCLOUD_LOG}"
+if [[ "$*" == *"tasks queues describe"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"tasks list"* ]]; then
+  printf '%s\n' \
+    'projects/example-project/locations/us-central1/queues/ember-cost-guard/tasks/guard-ember-gpu-20250101000000-1-gpu' \
+    'projects/example-project/locations/us-central1/queues/ember-cost-guard/tasks/guard-ember-gpu-20250101000000-1-cluster'
+fi
+`
+	if err := os.WriteFile(gcloudPath, []byte(fakeGcloud), 0o755); err != nil {
+		t.Fatalf("write fake gcloud: %v", err)
+	}
+
+	command := exec.Command("bash", "../../scripts/gcp-cost-guard.sh", "keep-cluster")
+	command.Env = append(os.Environ(),
+		"GCLOUD="+gcloudPath,
+		"GCLOUD_LOG="+logPath,
+		"PROJECT_ID=example-project",
+		"PROJECT_NUMBER=123456789",
+		"CLUSTER_NAME=ember-gpu",
+		"CLUSTER_LOCATION=us-central1-a",
+		"GPU_NODE_POOL=l4-spot",
+		"TASKS_LOCATION=us-central1",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("keep cluster timer: %v\n%s", err, output)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake gcloud log: %v", err)
+	}
+	text := string(log)
+	if !strings.Contains(text, "tasks delete guard-ember-gpu-20250101000000-1-cluster") {
+		t.Fatalf("cluster timer was not deleted:\n%s", text)
+	}
+	if strings.Contains(text, "tasks delete guard-ember-gpu-20250101000000-1-gpu") {
+		t.Fatalf("GPU timer was unexpectedly deleted:\n%s", text)
+	}
+}
+
+func TestCostGuardCanKeepClusterWithoutConfiguredQueue(t *testing.T) {
+	tempDir := t.TempDir()
+	gcloudPath := filepath.Join(tempDir, "gcloud")
+	fakeGcloud := `#!/usr/bin/env bash
+if [[ "$*" == *"tasks queues describe"* ]]; then
+  printf 'NOT_FOUND: queue does not exist\n' >&2
+  exit 1
+fi
+printf 'unexpected gcloud call: %s\n' "$*" >&2
+exit 99
+`
+	if err := os.WriteFile(gcloudPath, []byte(fakeGcloud), 0o755); err != nil {
+		t.Fatalf("write fake gcloud: %v", err)
+	}
+
+	command := exec.Command("bash", "../../scripts/gcp-cost-guard.sh", "keep-cluster")
+	command.Env = append(os.Environ(),
+		"GCLOUD="+gcloudPath,
+		"PROJECT_ID=example-project",
+		"PROJECT_NUMBER=123456789",
+		"CLUSTER_NAME=ember-gpu",
+		"CLUSTER_LOCATION=us-central1-a",
+		"GPU_NODE_POOL=l4-spot",
+		"TASKS_LOCATION=us-central1",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("keep cluster without queue: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "GPU-pool task is unchanged") {
+		t.Fatalf("keep cluster did not report safe no-op:\n%s", output)
+	}
+}
+
 func TestCostGuardRequiresExistingGPUPoolByDefault(t *testing.T) {
 	log, err := runCostGuardArm(t, false)
 	if err == nil {

@@ -1,0 +1,15 @@
+apiVersion: networking.gke.io/v1
+kind: GCPGatewayPolicy
+metadata:
+  name: ember-public
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-public-gateway
+    app.kubernetes.io/part-of: ember
+spec:
+  default:
+    sslPolicy: EMBER_GATEWAY_SSL_POLICY
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: ember-public

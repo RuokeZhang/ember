@@ -25,6 +25,7 @@ Commands:
   arm           Delete prior timers and schedule GPU-pool and cluster deletion.
   status        Show active deletion tasks for the configured cluster.
   disarm        Delete active deletion tasks without deleting GKE resources.
+  keep-cluster  Delete only the cluster timer while retaining the GPU-pool timer.
   destroy-gpu   Delete the GPU node pool now; requires CONFIRM_DESTROY.
   destroy-all   Delete the GKE cluster now; requires CONFIRM_DESTROY.
 
@@ -212,9 +213,21 @@ future_time() {
 }
 
 queue_exists() {
-  "${GCLOUD}" tasks queues describe "${QUEUE_NAME}" \
+  local output
+  if output=$("${GCLOUD}" tasks queues describe "${QUEUE_NAME}" \
     --project="${PROJECT_ID}" \
-    --location="${TASKS_LOCATION}" >/dev/null 2>&1
+    --location="${TASKS_LOCATION}" 2>&1); then
+    return 0
+  fi
+  if [[ "${output}" == *"NOT_FOUND"* ||
+    "${output}" == *"not found"* ||
+    "${output}" == *"does not exist"* ||
+    "${output}" == *"SERVICE_DISABLED"* ||
+    "${output}" == *"has not been used"* ]]; then
+    return 1
+  fi
+  printf '%s\n' "${output}" >&2
+  die "could not inspect Cloud Tasks queue ${QUEUE_NAME}"
 }
 
 delete_tasks() {
@@ -225,7 +238,7 @@ delete_tasks() {
     echo "Would remove existing ${TASK_PREFIX}-*${suffix} tasks."
     return
   fi
-  queue_exists || return
+  queue_exists || return 0
 
   while IFS= read -r full_name; do
     [[ -n "${full_name}" ]] || continue
@@ -352,6 +365,12 @@ disarm_guard() {
   echo "Deletion tasks removed for ${CLUSTER_NAME}."
 }
 
+keep_cluster() {
+  resolve_config
+  delete_tasks -cluster
+  echo "No cluster deletion task remains for ${CLUSTER_NAME}; the GPU-pool task is unchanged."
+}
+
 destroy_gpu() {
   resolve_config
   local expected="${PROJECT_ID}/${CLUSTER_LOCATION}/${CLUSTER_NAME}/${GPU_NODE_POOL}"
@@ -397,6 +416,9 @@ case "${1:-}" in
     ;;
   disarm)
     disarm_guard
+    ;;
+  keep-cluster)
+    keep_cluster
     ;;
   destroy-gpu)
     destroy_gpu
