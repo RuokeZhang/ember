@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
-  bootstrapSession,
   createEndpoint,
   deleteEndpoint,
-  getCatalog,
   getEndpoint,
   listEndpoints
 } from "./api";
+import { loadInitialData } from "./bootstrap";
 import { CreateEndpointDrawer } from "./components/CreateEndpointDrawer";
 import { EndpointDashboard } from "./components/EndpointDashboard";
 import { FleetOverview } from "./components/FleetOverview";
@@ -53,8 +52,8 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([bootstrapSession(), getCatalog(), listEndpoints()])
-      .then(([nextSession, nextCatalog, nextEndpoints]) => {
+    void loadInitialData()
+      .then(({ session: nextSession, catalog: nextCatalog, endpoints: nextEndpoints }) => {
         if (!active) {
           return;
         }
