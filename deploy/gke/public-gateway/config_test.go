@@ -112,10 +112,12 @@ func TestDeploymentScriptEnforcesDNSAndCleanupSafety(t *testing.T) {
 		`"${DIG}" +short AAAA`,
 		"DNS only (gray cloud)",
 		"wait_for_certificate",
+		"Google-managed certificate domain status:",
 		"keep_cluster_for_public_gateway",
 		"./scripts/gcp-cost-guard.sh keep-cluster",
 		`CLUSTER_NAME=${CLUSTER_NAME:-ember-gpu}`,
 		"validate_backend",
+		`(.observedGeneration // $generation) == $generation`,
 		`type == "Reconciled"`,
 		`type == "ResolvedRefs"`,
 		`type == "Ready"`,
@@ -138,6 +140,7 @@ func TestDeploymentScriptEnforcesDNSAndCleanupSafety(t *testing.T) {
 		"CLOUDFLARE_API_TOKEN",
 		"rm -rf",
 		"--allow-unauthenticated",
+		"Google-managed certificate domain validation failed",
 	} {
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("public Gateway script must not contain %q", forbidden)

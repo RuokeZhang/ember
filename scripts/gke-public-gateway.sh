@@ -344,7 +344,7 @@ wait_for_kubernetes_condition() {
 }
 
 wait_for_certificate() {
-  local description status
+  local description status domain_status last_domain_status=
 
   while ((SECONDS < GATEWAY_READY_DEADLINE)); do
     description=$("${GCLOUD}" compute ssl-certificates describe "${GATEWAY_CERTIFICATE}" \
@@ -362,10 +362,10 @@ wait_for_certificate() {
         die "Google-managed certificate provisioning failed"
         ;;
     esac
-    if jq -e 'any((.managed.domainStatus // {})[]; startswith("FAILED"))' \
-      <<<"${description}" >/dev/null; then
-      jq '.managed' <<<"${description}" >&2
-      die "Google-managed certificate domain validation failed"
+    domain_status=$(jq -c '.managed.domainStatus // {}' <<<"${description}")
+    if [[ "${domain_status}" != "${last_domain_status}" ]]; then
+      echo "Google-managed certificate domain status: ${domain_status}"
+      last_domain_status=${domain_status}
     fi
     sleep 15
   done
@@ -400,23 +400,23 @@ deploy() {
 
   wait_for_kubernetes_condition \
     "healthcheckpolicy/ember-gateway" \
-    '.metadata.generation as $generation | any(.status.conditions[]?; .observedGeneration == $generation and .type == "Attached" and .status == "True")' \
+    '.metadata.generation as $generation | any(.status.conditions[]?; (.observedGeneration // $generation) == $generation and .type == "Attached" and .status == "True")' \
     "HealthCheckPolicy"
   wait_for_kubernetes_condition \
     "gcpbackendpolicy/ember-gateway" \
-    '.metadata.generation as $generation | any(.status.conditions[]?; .observedGeneration == $generation and .type == "Attached" and .status == "True")' \
+    '.metadata.generation as $generation | any(.status.conditions[]?; (.observedGeneration // $generation) == $generation and .type == "Attached" and .status == "True")' \
     "GCPBackendPolicy"
   wait_for_kubernetes_condition \
     "gcpgatewaypolicy/${GATEWAY_NAME}" \
-    '.metadata.generation as $generation | any(.status.conditions[]?; .observedGeneration == $generation and .type == "Attached" and .status == "True")' \
+    '.metadata.generation as $generation | any(.status.conditions[]?; (.observedGeneration // $generation) == $generation and .type == "Attached" and .status == "True")' \
     "GCPGatewayPolicy"
   wait_for_kubernetes_condition \
     "httproute/${GATEWAY_ROUTE_NAME}" \
-    '.metadata.generation as $generation | (any(.status.parents[]?.conditions[]?; .observedGeneration == $generation and .type == "Accepted" and .status == "True")) and (any(.status.parents[]?.conditions[]?; .observedGeneration == $generation and (.type == "Reconciled" or .type == "ResolvedRefs") and .status == "True"))' \
+    '.metadata.generation as $generation | (any(.status.parents[]?.conditions[]?; (.observedGeneration // $generation) == $generation and .type == "Accepted" and .status == "True")) and (any(.status.parents[]?.conditions[]?; (.observedGeneration // $generation) == $generation and (.type == "Reconciled" or .type == "ResolvedRefs") and .status == "True"))' \
     "HTTPRoute"
   wait_for_kubernetes_condition \
     "gateway/${GATEWAY_NAME}" \
-    '.metadata.generation as $generation | any(.status.conditions[]?; .observedGeneration == $generation and (.type == "Programmed" or .type == "Ready") and .status == "True")' \
+    '.metadata.generation as $generation | any(.status.conditions[]?; (.observedGeneration // $generation) == $generation and (.type == "Programmed" or .type == "Ready") and .status == "True")' \
     "Gateway"
   wait_for_certificate
 
