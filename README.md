@@ -28,6 +28,7 @@ The Kind control-plane and product milestones are complete. The real-runtime pat
 - Fleet and endpoint dashboards backed by authoritative CR status, Prometheus time series, Kubernetes API inspection, append-only audit records, and bounded engine logs.
 - OpenAI-compatible chat with SSE streaming and a browser-driven concurrent Load Lab.
 - A GKE overlay plus amd64 Cloud Build, one-L4 Spot cluster automation, and a focused real-runtime smoke test.
+- A global GKE HTTPS Gateway workflow with a reserved IPv4 address, Google-managed certificate, TLS 1.2 policy, and `/v1`-only routing.
 - A Replit build profile for the same-origin Web + Control API product surface.
 
 Performance numbers in the design document are targets until they are measured on GKE with a real NVIDIA L4 and vLLM. Simulated results are never presented as GPU performance.
@@ -62,7 +63,7 @@ The root [`.replit`](./.replit) file uses the reviewed Replit Go 1.25 and Node.j
 
 Before importing this repository into Replit:
 
-1. Provide an externally reachable HTTPS endpoint for `ember-gateway`. The current GKE overlay intentionally leaves the Gateway as a `ClusterIP`; Replit cannot reach it until a separate TLS edge is configured.
+1. Deploy the GKE public edge described in [GKE public HTTPS edge](#gke-public-https-edge). The `ember-gateway` Service remains a `ClusterIP`; only the authenticated `/v1` surface is published.
 2. Add a Replit SQL Database. Replit supplies its connection through `DATABASE_URL`, which Ember reads directly.
 3. Configure the following deployment values. Store the signing key only in Replit Secrets and never commit it.
 
@@ -74,6 +75,8 @@ Before importing this repository into Replit:
 | `DATABASE_URL` | Yes | Supplied automatically by the attached Replit development or production database |
 
 The application refuses to start on Replit if the Gateway URL is not HTTPS, the signing-key secret is absent, or secure session cookies are disabled. After Preview responds successfully, publish the service and verify `/readyz` before exercising endpoint creation or inference.
+
+For the browser URL, add `ember.ruokezhang.com` as a Replit custom domain after publishing. Copy the exact verification and routing records Replit displays into Cloudflare and keep them DNS-only until Replit has issued its certificate. Do not point this hostname at the GKE address; `ember.ruokezhang.com` serves the Replit product, while `api.ember.ruokezhang.com` is the JWT-protected GKE boundary used only by the Control API.
 
 ## Safety
 
@@ -156,6 +159,72 @@ make gke-real-smoke GCP_PROJECT=your-project-id
 The smoke test refreshes the cleanup timers, ensures one L4 node is running, waits up to 30 minutes for the 5.58 GB verified cache and vLLM startup, sends one OpenAI-compatible chat request, labels its wall time as a non-benchmark sample, then deletes the endpoint and resizes the GPU pool to zero. Set `KEEP_RESOURCES=true` only when you intentionally need to inspect the live endpoint; the previously armed TTL tasks still apply.
 
 The real model artifact is the deterministic manifest digest `sha256:41d12f80b6d62f01e9134f410ab177d907ccb025e41bbb651bd83e8e8304f010`. The official amd64 vLLM image is pinned to `sha256:6cf9808ca8810fc6c3fd0451c2e7784fb224590d81f7db338e7eaf3c02a33d33`. No `--trust-remote-code` path is enabled.
+
+### GKE public HTTPS edge
+
+The public edge is an explicit, separately billed deployment. It uses `gke-l7-global-external-managed`, a reserved global Premium IPv4 address, a Google-managed Compute Engine certificate, and a MODERN SSL policy with TLS 1.2 minimum. The `HTTPRoute` publishes only `/v1`; `/healthz` and `/metrics` remain unreachable from the internet. A `HealthCheckPolicy` probes `/healthz` directly on port 8080, and a `GCPBackendPolicy` raises the backend timeout to 180 seconds for inference and SSE requests.
+
+The cluster creation script enables the GKE Gateway API Standard channel for both new and existing clusters. On an existing cluster, GKE can take up to 45 minutes to install the Gateway API resources.
+
+Reserve the dedicated cloud resources and print the DNS value:
+
+```sh
+make gke-gateway-prepare \
+  GCP_PROJECT=your-project-id \
+  GATEWAY_HOST=api.ember.ruokezhang.com
+```
+
+In Cloudflare DNS, create this record using the IP printed by the command:
+
+| Setting | Value |
+|---|---|
+| Type | `A` |
+| Name | `api.ember` |
+| IPv4 address | Reserved IP printed by `gke-gateway-prepare` |
+| Proxy status | **DNS only** (gray cloud) |
+| TTL | Auto |
+
+Do not add an `AAAA` record. Cloudflare's orange-cloud proxy hides the load balancer address and prevents the script from accepting the DNS configuration; it can also prevent Google from provisioning or renewing the managed certificate.
+
+After public DNS resolves directly to the reserved address, deploy and verify the edge:
+
+```sh
+make gke-gateway-deploy GCP_PROJECT=your-project-id
+make gke-gateway-status GCP_PROJECT=your-project-id
+make gke-gateway-smoke GCP_PROJECT=your-project-id
+```
+
+`gke-gateway-deploy` refuses to continue unless the A record resolves only to the reserved IPv4 address and no AAAA answer exists. It then waits for the policies, route, Gateway, and certificate. The smoke test confirms that `/healthz` and `/metrics` return edge-level 404s, unauthenticated `/v1` returns 401, and a short-lived signed request reaches the in-cluster Gateway.
+
+Deploying a public Gateway also removes only the cost guard's cluster-deletion task. Any configured GPU-pool deletion task remains unchanged. This prevents a blind cluster deletion from orphaning the external load balancer, but it means the CPU node, GKE control plane, load balancer, and reserved address continue to incur charges until explicitly removed. Re-running cluster creation or the real-GPU smoke detects the public Gateway and preserves the same behavior.
+
+Set the Replit secret `EMBER_GATEWAY_URL=https://api.ember.ruokezhang.com` only after the smoke passes. Copy the existing `ember-jwt-keys` private key into `EMBER_GATEWAY_PRIVATE_KEY_BASE64`; do not generate a second key:
+
+```sh
+kubectl -n ember-system get secret ember-jwt-keys \
+  -o jsonpath='{.data.private\.key}'
+```
+
+The static IP, certificate, SSL policy, and load balancer can incur charges independently of the GPU node pool. Remove them before deleting the Cloudflare record:
+
+```sh
+CONFIRM_DESTROY=your-project-id/api.ember.ruokezhang.com \
+  make gke-gateway-destroy GCP_PROJECT=your-project-id
+```
+
+After the public edge is gone, inspect the timers. Re-arm them only if the GPU node pool still exists:
+
+```sh
+make gcp-cost-guard-status GCP_PROJECT=your-project-id
+make gcp-cost-guard-arm GCP_PROJECT=your-project-id
+```
+
+If the GPU timer already deleted that pool, remove the now-unneeded cluster directly instead of creating another GPU pool:
+
+```sh
+CONFIRM_DESTROY=your-project-id/us-central1-a/ember-gpu \
+  make gcp-cost-guard-destroy GCP_PROJECT=your-project-id
+```
 
 ### Kind lifecycle
 

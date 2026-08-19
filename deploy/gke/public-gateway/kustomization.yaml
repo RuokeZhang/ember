@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gateway.yaml
+  - route.yaml
+  - health_check_policy.yaml
+  - backend_policy.yaml
+  - gateway_policy.yaml

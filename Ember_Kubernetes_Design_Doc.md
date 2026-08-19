@@ -153,6 +153,12 @@ Replit-hosted Web + Control API          [outside cluster, no k8s credentials]
   |  - user-facing metadata, Postgres
   |  - request validation against allowlists
   |  - short-lived signed JWT calls to gateway
+  | HTTPS to api.ember.ruokezhang.com
+  v
+GKE global external managed Gateway      [public TLS edge]
+  |  - reserved global IPv4, Google-managed certificate
+  |  - TLS 1.2+ MODERN policy
+  |  - publishes /v1 only; health and metrics stay private
   v
 In-cluster Endpoint Gateway              [security boundary]
   |  - authenticates caller, maps to ownerID
@@ -206,7 +212,17 @@ The anonymous demo session is an opaque, cryptographically random token stored i
 
 Endpoint creation requires an `Idempotency-Key`. The control API atomically reserves a presentation row and deterministic `ep-...` ID before calling the gateway. Repeating the same key and normalized request returns the same endpoint; reusing the key with different input returns `409 Conflict`. The gateway accepts that preallocated ID and treats an existing endpoint with the same owner and spec as a successful replay. This closes the failure window where the CR is created but the public API loses the response.
 
-### 5.2 Endpoint Gateway
+### 5.2 Public GKE Edge
+
+Cloudflare is authoritative DNS only, not an application proxy. The `api.ember.ruokezhang.com` A record points directly to a reserved global Premium IPv4 address with proxying disabled. This keeps the Google-managed certificate's domain validation and renewal path tied to the actual load balancer.
+
+The edge uses the `gke-l7-global-external-managed` GatewayClass. TLS terminates with a pre-created Google-managed Compute Engine certificate, and a `GCPGatewayPolicy` attaches a MODERN SSL policy with TLS 1.2 as the minimum. The only public route is a hostname-bound `/v1` `PathPrefix` to the `ember-gateway` ClusterIP Service. `/healthz` and `/metrics` are intentionally absent from the public route.
+
+GKE load balancer probes reach Pods directly, so a `HealthCheckPolicy` uses fixed port 8080 and `/healthz` without publishing that path. A `GCPBackendPolicy` sets a 180-second timeout so ordinary inference and bounded SSE streams are not cut off by the 30-second default. Cloud Armor and IAP are deferred: IAP would replace the existing service-to-service JWT flow, while Cloud Armor is a separate hardening layer after the first end-to-end deployment.
+
+Provisioning is deliberately two-stage. `prepare` reserves the IP, managed certificate, and SSL policy and prints the manual Cloudflare DNS-only record. `deploy` refuses to apply the Gateway until public A resolution matches only the reserved address and no AAAA record exists, then removes only the cost guard's cluster-deletion task, leaving any GPU-pool timer unchanged. This avoids a blind cluster deletion that can orphan load-balancer resources. Deployment then waits for policy attachment, route acceptance, Gateway programming, and certificate activation. Destruction requires the exact project and hostname and removes both Kubernetes and dedicated GCP edge resources; normal cleanup timers can be re-armed afterward when the GPU pool still exists.
+
+### 5.3 Endpoint Gateway
 
 A small Go service in the cluster. It exists because the public Replit application must not hold a kubeconfig, and because RBAC alone cannot express the authorization rule the product needs.
 
@@ -225,7 +241,7 @@ Authentication uses a short-lived signed JWT issued by the control API and verif
 
 The gateway ServiceAccount has RBAC for `InferenceEndpoint` objects in `ember-system` and `pods/log` in Ember-managed workload namespaces, and nothing else. It cannot create Pods, read Secrets, create namespaces, or touch namespaces outside the managed label selector.
 
-### 5.3 Ember Operator
+### 5.4 Ember Operator
 
 Deployed in `ember-system`. `InferenceEndpoint` objects also live in `ember-system`; each endpoint receives a generated workload namespace recorded in status. `ModelCache` remains cluster-scoped. This avoids the impossible bootstrap cycle where a namespaced CR would need to exist before the operator could create its namespace, and it keeps namespace mutation out of the public gateway. Two controllers:
 
@@ -245,7 +261,7 @@ Reconcile(observed cluster state, InferenceEndpoint spec)
 
 The loop must be idempotent. Child names derive from the immutable CR UID. All managed objects carry `ember.dev/endpoint-uid` and `ember.dev/owner` labels. A controller restart or duplicate event must not produce a second Deployment or a second prefetch Job.
 
-### 5.4 Serving Runtime
+### 5.5 Serving Runtime
 
 The MVP uses a pinned vLLM OpenAI-server image. Ember supplies configuration; it never supplies model code.
 
@@ -920,19 +936,20 @@ Everything reported in the README comes from this tier, with the cluster, GPU, m
 
 ## 22. Infrastructure and Cost Plan
 
-The project is designed so that development costs nothing and only validation costs money.
+The project keeps local development free and makes every hosted or GPU-backed cost explicit.
 
 | Tier | Environment | Cost |
 |---|---|---|
 | Development, CI | kind + in-repository fake GPU device plugin + mock engine | $0 |
-| Always-on demo control plane | Single small CPU VM (Hetzner/DO) running k3s server, operator, gateway, Prometheus | ~$10/month |
+| Hosted product surface | Replit Web + Control API and database | Replit plan dependent |
+| Public Kubernetes control plane | Zonal GKE Standard CPU node plus global HTTPS load balancer and reserved IPv4 | Ongoing GKE, Compute Engine, and load-balancing charges |
 | GPU validation and demo recording | GKE, L4 spot node pool, scaled from zero | ~$0.30–0.40/hr all-in |
 
 **Budget.** A validation session is six to eight hours including setup and recording. Four sessions plus one two-node session lands at roughly $40–60. A hard ceiling of $150 applies; exceeding it means logic is being debugged on GPUs, which is the wrong tier. If unused new-account credit is available on GCP it likely covers the whole project.
 
-**Two practical constraints.** GCP GPU quota defaults to zero and must be requested in advance, with a one-to-two day turnaround. And a forgotten instance is the largest real financial risk in a project like this, so a budget alert and a hard shutdown timer are part of the deployment scripts, not an afterthought.
+**Two practical constraints.** GCP GPU quota defaults to zero and must be requested in advance, with a one-to-two day turnaround. And forgotten infrastructure is the largest real financial risk in a project like this, so budget alerts, a GPU-pool deletion timer, and explicit public-edge teardown are part of the deployment workflow rather than afterthoughts.
 
-**Always-on demo behavior.** The control plane stays up permanently; the GPU node pool sits at zero. A visitor creating an endpoint sees `Progressing / ProvisioningNode` and, absent a running node pool, eventually `InsufficientGPU` with an accurate message. This is not a degraded demo — it is the scale-from-zero path with the node tier disabled, and the UI states exactly that. A two-minute recording at the top of the README covers the GPU-backed portion.
+**Always-on demo behavior.** Keeping the public URL live means intentionally retaining the GKE CPU cluster and HTTPS load balancer after disabling the automatic cluster deletion task. The independent GPU-pool timer remains active and deletes the expensive node pool. A visitor creating an endpoint without that pool eventually sees `InsufficientGPU` with an accurate message. A two-minute recording at the top of the README covers the GPU-backed portion. Removing the public edge and cluster is the only way to stop all GKE and load-balancing charges.
 
 RunPod is explicitly excluded as an option: its Pods and Instant Clusters are containerized environments that do not support Kubernetes, and its bare-metal tier requires a multi-month commitment.
 
@@ -963,6 +980,8 @@ KEDA integration on queue depth. Scale-to-zero, gateway activation path, `lastAc
 ### Phase 4 — Product surface and evidence
 
 Replit UI: lifecycle timeline, conditions with evidence, chat box, load generator, cold-versus-warm latency chart, GPU cost and idle panel. Prometheus dashboards. Full failure-injection and security suites. README with reproducible commands and honest scoping. Two-minute demo recording.
+
+The repository now includes the Replit build profile and the GKE public HTTPS edge workflow. The remaining deployment work is operational: provision the edge, add the Cloudflare DNS-only record, publish Replit with the matching signing key, and collect real GKE evidence.
 
 **Exit:** a reviewer completes the whole flow from one URL, and every claim maps to a script they could run.
 

@@ -1,0 +1,15 @@
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: ember-gateway
+  namespace: ember-system
+  labels:
+    app.kubernetes.io/name: ember-public-gateway
+    app.kubernetes.io/part-of: ember
+spec:
+  default:
+    timeoutSec: 180
+  targetRef:
+    group: ""
+    kind: Service
+    name: ember-gateway

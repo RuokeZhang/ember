@@ -81,15 +81,40 @@ gpu_pool_exists() {
 }
 
 validate_existing_cluster() {
-  local description datapath workload_pool
+  local description datapath workload_pool http_load_balancing_disabled
   description=$("${GCLOUD}" container clusters describe "${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
     --location="${CLUSTER_LOCATION}" \
     --format=json)
   datapath=$(jq -r '.networkConfig.datapathProvider // empty' <<<"${description}")
   workload_pool=$(jq -r '.workloadIdentityConfig.workloadPool // empty' <<<"${description}")
+  http_load_balancing_disabled=$(jq -r '.addonsConfig.httpLoadBalancing.disabled // false' <<<"${description}")
   [[ "${datapath}" == "ADVANCED_DATAPATH" ]] || die "existing cluster does not use GKE Dataplane V2"
   [[ "${workload_pool}" == "${PROJECT_ID}.svc.id.goog" ]] || die "existing cluster has an unexpected Workload Identity pool"
+  [[ "${http_load_balancing_disabled}" != "true" ]] || die "existing cluster has the HttpLoadBalancing add-on disabled"
+}
+
+ensure_gateway_api() {
+  local description channel
+  description=$("${GCLOUD}" container clusters describe "${CLUSTER_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${CLUSTER_LOCATION}" \
+    --format=json)
+  channel=$(jq -r '.networkConfig.gatewayApiConfig.channel // empty' <<<"${description}")
+  if [[ "${channel}" != "CHANNEL_STANDARD" ]]; then
+    echo "Enabling the GKE Gateway API standard channel; this can take up to 45 minutes."
+    "${GCLOUD}" container clusters update "${CLUSTER_NAME}" \
+      --project="${PROJECT_ID}" \
+      --location="${CLUSTER_LOCATION}" \
+      --gateway-api=standard \
+      --quiet
+    description=$("${GCLOUD}" container clusters describe "${CLUSTER_NAME}" \
+      --project="${PROJECT_ID}" \
+      --location="${CLUSTER_LOCATION}" \
+      --format=json)
+    channel=$(jq -r '.networkConfig.gatewayApiConfig.channel // empty' <<<"${description}")
+  fi
+  [[ "${channel}" == "CHANNEL_STANDARD" ]] || die "GKE Gateway API standard channel is not enabled"
 }
 
 validate_existing_gpu_pool() {
@@ -145,6 +170,18 @@ cost_guard() {
     CLUSTER_TTL_HOURS="${CLUSTER_TTL_HOURS}" \
     ALLOW_MISSING_GPU_POOL="${ALLOW_MISSING_GPU_POOL:-false}" \
     ./scripts/gcp-cost-guard.sh "$@"
+}
+
+preserve_cluster_if_public_gateway_exists() {
+  local gateways
+  if ! gateways=$(kubectl get gateways.gateway.networking.k8s.io -A -o json 2>/dev/null); then
+    return
+  fi
+  if jq -e 'any(.items[]?; .spec.gatewayClassName == "gke-l7-global-external-managed")' \
+    <<<"${gateways}" >/dev/null; then
+    cost_guard keep-cluster
+    echo "Public Gateway detected; retained the GPU-pool timer but removed the cluster deletion timer."
+  fi
 }
 
 setup_node_service_account() {
@@ -255,6 +292,7 @@ create_cluster() {
       --image-type=COS_CONTAINERD \
       --enable-ip-alias \
       --enable-dataplane-v2 \
+      --gateway-api=standard \
       --enable-shielded-nodes \
       --workload-pool="${PROJECT_ID}.svc.id.goog" \
       --service-account="${NODE_SERVICE_ACCOUNT_EMAIL}" \
@@ -264,6 +302,8 @@ create_cluster() {
       --monitoring=SYSTEM
     created_cluster=true
   fi
+
+  ensure_gateway_api
 
   if ! "${GCLOUD}" container clusters get-credentials "${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
@@ -280,6 +320,7 @@ create_cluster() {
     fi
     die "cleanup timers could not be armed; GPU creation was blocked"
   fi
+  preserve_cluster_if_public_gateway_exists
 
   if gpu_pool_exists; then
     validate_existing_gpu_pool || die "existing GPU node pool failed validation"
