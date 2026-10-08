@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -43,6 +44,20 @@ func main() {
 	coreClient, err := kubernetes.NewForConfig(config)
 	must(err)
 	store := gateway.NewKubernetesStore(kubeClient, coreClient, namespace)
+	endpointCache, err := cache.New(config, cache.Options{
+		Scheme:                      scheme,
+		DefaultNamespaces:           map[string]cache.Config{namespace: {}},
+		ReaderFailOnMissingInformer: true,
+	})
+	must(err)
+	ctx := ctrl.SetupSignalHandler()
+	_, err = endpointCache.GetInformer(ctx, &servingv1alpha1.InferenceEndpoint{})
+	must(err)
+	go func() { must(endpointCache.Start(ctx)) }()
+	if !endpointCache.WaitForCacheSync(ctx) {
+		must(errors.New("endpoint cache synchronization failed"))
+	}
+	store.EndpointReader = endpointCache
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          100,

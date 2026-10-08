@@ -127,8 +127,9 @@ type InferenceEndpointReplicaStatus struct {
 }
 
 type InferenceEndpointPlacementStatus struct {
-	Node       string `json:"node,omitempty"`
-	CacheState string `json:"cacheState,omitempty"`
+	Node       string   `json:"node,omitempty"`
+	Nodes      []string `json:"nodes,omitempty"`
+	CacheState string   `json:"cacheState,omitempty"`
 }
 
 type InferenceEndpointModelStatus struct {

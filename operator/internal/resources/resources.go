@@ -23,13 +23,14 @@ import (
 )
 
 const (
-	LabelManaged     = platform.LabelManaged
-	LabelEndpointUID = platform.LabelEndpointUID
-	LabelOwner       = platform.LabelOwner
-	LabelAdmission   = "ember.dev/admission-policy"
-	LabelComponent   = platform.LabelComponent
-	LabelModelCache  = "ember.dev/model-cache"
-	LabelCacheHash   = "ember.dev/cache-hash"
+	LabelManaged      = platform.LabelManaged
+	LabelEndpointUID  = platform.LabelEndpointUID
+	LabelEndpointName = "ember.dev/endpoint-name"
+	LabelOwner        = platform.LabelOwner
+	LabelAdmission    = "ember.dev/admission-policy"
+	LabelComponent    = platform.LabelComponent
+	LabelModelCache   = "ember.dev/model-cache"
+	LabelCacheHash    = "ember.dev/cache-hash"
 
 	ManagedValue   = "true"
 	AdmissionValue = "hostpath-cache-only"
@@ -43,6 +44,7 @@ const (
 	PrefetchServiceAccountName   = "ember-prefetch"
 	PrefetchImage                = "ember-prefetch:dev"
 	PrefetchJobTTLSeconds        = int32(300)
+	PrefetchJobDeadlineSeconds   = int64(1800)
 	ScaledObjectName             = "engine-autoscaler"
 	KEDAPausedAnnotation         = "autoscaling.keda.sh/paused"
 	KEDAPausedReplicasAnnotation = "autoscaling.keda.sh/paused-replicas"
@@ -53,7 +55,6 @@ const (
 var ScaledObjectGVK = schema.GroupVersionKind{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledObject"}
 
 type CachePlacement struct {
-	NodeName       string
 	CacheHash      string
 	CacheState     string
 	ExpectedDigest string
@@ -355,7 +356,7 @@ func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model
 	podSpec := corev1.PodSpec{
 		ServiceAccountName:           EngineName,
 		AutomountServiceAccountToken: &falseValue,
-		NodeSelector:                 map[string]string{catalog.DefaultGPUNodeLabelKey: catalog.DefaultGPUNodeLabelValue},
+		NodeSelector:                 catalog.CopySelector(model.NodePoolSelector),
 		Tolerations: []corev1.Toleration{{
 			Key:      "nvidia.com/gpu",
 			Operator: corev1.TolerationOpEqual,
@@ -449,21 +450,26 @@ func Deployment(endpoint *servingv1alpha1.InferenceEndpoint, model catalog.Model
 			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: catalog.CacheRoot + "/" + placement.CacheHash, Type: &directory}},
 		}},
 	}
-	if placement.NodeName != "" {
-		podSpec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{placement.NodeName}}}}}}}}
-	}
+	podSpec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: catalog.CacheLabelKey(model.ID, model.Revision), Operator: corev1.NodeSelectorOpIn, Values: []string{"ready"}}}}}}}}
+	deploymentLabels := ManagedLabels(endpoint)
+	deploymentLabels[LabelModelCache] = catalog.ModelCacheName(model.ID, model.Revision)
+	deploymentLabels[LabelEndpointName] = endpoint.Name
+	podLabels := LabelsForObject(endpoint)
+	podLabels[LabelCacheHash] = placement.CacheHash
+	podLabels[LabelEndpointName] = endpoint.Name
+	podLabels[LabelModelCache] = catalog.ModelCacheName(model.ID, model.Revision)
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      EngineName,
 			Namespace: WorkloadNamespaceName(endpoint.UID),
-			Labels:    ManagedLabels(endpoint),
+			Labels:    deploymentLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicasCopy,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
-			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: podSpec},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}, Spec: podSpec},
 		},
 	}
 }
@@ -554,7 +560,7 @@ func ModelCacheLabels(modelCache *servingv1alpha1.ModelCache) map[string]string 
 	}
 }
 
-func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simulationMode bool, prefetchImage string) *batchv1.Job {
+func PrefetchJob(modelCache *servingv1alpha1.ModelCache, node *corev1.Node, simulationMode bool, prefetchImage string) *batchv1.Job {
 	falseValue := false
 	rootUser := int64(0)
 	rootGroup := int64(0)
@@ -564,7 +570,8 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 	prefetchImage = configuredPrefetchImage(prefetchImage)
 	directoryOrCreate := corev1.HostPathDirectoryOrCreate
 	labels := ModelCacheLabels(modelCache)
-	labels["ember.dev/node-name"] = nodeName
+	labels["ember.dev/node-name"] = node.Name
+	labels["ember.dev/node-uid"] = string(node.UID)
 	args := []string{
 		"--root", catalog.CacheRoot,
 		"--cache-hash", cacheHash,
@@ -593,6 +600,7 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: ptr(PrefetchJobTTLSeconds),
+			ActiveDeadlineSeconds:   ptr(PrefetchJobDeadlineSeconds),
 			BackoffLimit:            ptr(int32(1)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -600,7 +608,7 @@ func PrefetchJob(modelCache *servingv1alpha1.ModelCache, nodeName string, simula
 					ServiceAccountName:           PrefetchServiceAccountName,
 					AutomountServiceAccountToken: &falseValue,
 					RestartPolicy:                corev1.RestartPolicyNever,
-					NodeSelector:                 map[string]string{"kubernetes.io/hostname": nodeName},
+					NodeSelector:                 map[string]string{"kubernetes.io/hostname": node.Name},
 					Tolerations: []corev1.Toleration{{
 						Key:      "nvidia.com/gpu",
 						Operator: corev1.TolerationOpEqual,

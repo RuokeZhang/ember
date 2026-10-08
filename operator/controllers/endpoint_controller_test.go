@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -86,7 +88,7 @@ func TestEndpointReconcileUsesRealArtifactMetadataOutsideSimulation(t *testing.T
 	}
 }
 
-func TestEndpointReconcileCreatesPinnedDeploymentWhenCacheReady(t *testing.T) {
+func TestEndpointReconcileCreatesDeploymentWhenCacheReady(t *testing.T) {
 	ctx := context.Background()
 	endpoint := testEndpoint()
 	model, _ := catalog.LookupModel(endpoint.Spec.Model.ID)
@@ -113,7 +115,7 @@ func TestEndpointReconcileCreatesPinnedDeploymentWhenCacheReady(t *testing.T) {
 	if err := c.Get(ctx, req.NamespacedName, current); err != nil {
 		t.Fatalf("get endpoint: %v", err)
 	}
-	if current.Status.Placement.Node != "node-a" || current.Status.Placement.CacheState != "Hit" {
+	if current.Status.Placement.Node != "" || current.Status.Placement.CacheState != "Hit" {
 		t.Fatalf("expected cache hit placement, got %#v", current.Status.Placement)
 	}
 
@@ -415,7 +417,11 @@ func newControllerClient(t *testing.T, objects ...client.Object) (*EndpointRecon
 	t.Helper()
 	scheme := runtime.NewScheme()
 	mustAddSchemes(t, scheme)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&servingv1alpha1.InferenceEndpoint{}, &servingv1alpha1.ModelCache{}, &appsv1.Deployment{}, &batchv1.Job{}).WithObjects(objects...).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1.Pod{}, podNodeIndex, podNodeKeys).
+		WithIndex(&corev1.Node{}, nodeModelCacheIndex, nodeModelCacheKeys).
+		WithIndex(&corev1.Node{}, nodeGPUPoolIndex, nodeGPUPoolKeys).
+		WithIndex(&servingv1alpha1.InferenceEndpoint{}, endpointModelIndex, endpointModelKeys).WithStatusSubresource(&servingv1alpha1.InferenceEndpoint{}, &servingv1alpha1.ModelCache{}, &appsv1.Deployment{}, &batchv1.Job{}).WithObjects(objects...).Build()
 	reconciler := &EndpointReconciler{Client: c, DirectClient: c, ManagedNamespace: servingv1alpha1.EmberSystemNamespace, Clock: staticClock{now: time.Date(2026, 8, 15, 22, 0, 0, 0, time.UTC)}, SimulationMode: true}
 	return reconciler, c
 }
@@ -451,4 +457,99 @@ func readyModelCache(model catalog.Model) *servingv1alpha1.ModelCache {
 
 func readyNode(name, cacheHash string, gpu int64) *corev1.Node {
 	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"ember.dev/gpu": "l4", "kubernetes.io/hostname": name, "cache.ember.dev/" + cacheHash: "ready"}}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): *resource.NewQuantity(gpu, resource.DecimalSI)}, Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+}
+
+func TestEndpointUpgradesExistingDeploymentWithoutChangingSelector(t *testing.T) {
+	ctx := context.Background()
+	endpoint := testEndpoint()
+	model, _ := catalog.LookupModel(endpoint.Spec.Model.ID)
+	profile, _ := catalog.LookupProfile(string(endpoint.Spec.Profile))
+	cache := readyModelCache(model)
+	node := readyNode("node-a", catalog.CacheHashForModel(model), 2)
+	previous := resources.Deployment(endpoint, model, profile, resources.CachePlacement{CacheHash: catalog.CacheHashForModel(model)}, 1, true, "")
+	delete(previous.Labels, resources.LabelEndpointName)
+	delete(previous.Labels, resources.LabelModelCache)
+	delete(previous.Spec.Template.Labels, resources.LabelEndpointName)
+	delete(previous.Spec.Template.Labels, resources.LabelModelCache)
+	previous.Spec.Template.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{node.Name}}}}}}}}
+	selector := previous.Spec.Selector.DeepCopy()
+	reconciler, c := newControllerClient(t, endpoint, cache, node, previous)
+	reconciler.DirectClient = immutableDeploymentSelectorClient{Client: c}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(endpoint)}
+	mustReconcile(t, ctx, reconciler, req)
+	mustReconcile(t, ctx, reconciler, req)
+	current := &appsv1.Deployment{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(previous), current); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(selector, current.Spec.Selector) || current.Spec.Template.Labels[resources.LabelEndpointName] == "" {
+		t.Fatal("upgrade did not preserve selector and add event labels")
+	}
+}
+
+type immutableDeploymentSelectorClient struct{ client.Client }
+
+func (c immutableDeploymentSelectorClient) Update(ctx context.Context, object client.Object, options ...client.UpdateOption) error {
+	if deployment, ok := object.(*appsv1.Deployment); ok {
+		current := &appsv1.Deployment{}
+		if err := c.Client.Get(ctx, client.ObjectKeyFromObject(deployment), current); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(current.Spec.Selector, deployment.Spec.Selector) {
+			return fmt.Errorf("Deployment selector is immutable")
+		}
+	}
+	return c.Client.Update(ctx, object, options...)
+}
+
+func TestEndpointCacheExpansionKeepsTemplateAndReportsObservedNodes(t *testing.T) {
+	ctx := context.Background()
+	endpoint := testEndpoint()
+	model, _ := catalog.LookupModel(endpoint.Spec.Model.ID)
+	cache := readyModelCache(model)
+	nodeA := readyNode("node-a", catalog.CacheHashForModel(model), 1)
+	reconciler, c := newControllerClient(t, endpoint, cache, nodeA)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(endpoint)}
+	mustReconcile(t, ctx, reconciler, req)
+	mustReconcile(t, ctx, reconciler, req)
+	deployment := &appsv1.Deployment{}
+	if err := c.Get(ctx, client.ObjectKey{Name: resources.EngineName, Namespace: resources.WorkloadNamespaceName(endpoint.UID)}, deployment); err != nil {
+		t.Fatal(err)
+	}
+	previousSpec, previousVersion := deployment.Spec.DeepCopy(), deployment.ResourceVersion
+	if err := c.Create(ctx, readyNode("node-b", catalog.CacheHashForModel(model), 1)); err != nil {
+		t.Fatal(err)
+	}
+	podA := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "engine-a", Namespace: deployment.Namespace, Labels: resources.LabelsForObject(endpoint)}, Spec: corev1.PodSpec{NodeName: nodeA.Name}}
+	podB := podA.DeepCopy()
+	podB.Name, podB.Spec.NodeName = "engine-b", "node-b"
+	for _, pod := range []*corev1.Pod{podA, podB} {
+		if err := c.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustReconcile(t, ctx, reconciler, req)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(deployment), deployment); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(previousSpec, &deployment.Spec) || previousVersion != deployment.ResourceVersion {
+		t.Fatal("cache addition restarted Deployment")
+	}
+	current := &servingv1alpha1.InferenceEndpoint{}
+	if err := c.Get(ctx, req.NamespacedName, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Placement.Node != "" || !reflect.DeepEqual(current.Status.Placement.Nodes, []string{"node-a", "node-b"}) {
+		t.Fatalf("incorrect placement: %#v", current.Status.Placement)
+	}
+	if err := c.Delete(ctx, podB); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, ctx, reconciler, req)
+	if err := c.Get(ctx, req.NamespacedName, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Placement.Node != "node-a" {
+		t.Fatal("single-node status missing")
+	}
 }

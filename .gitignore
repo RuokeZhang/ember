@@ -16,3 +16,4 @@ web/node_modules/
 web/dist/
 *.tsbuildinfo
 *.log
+ember-notes.private.html

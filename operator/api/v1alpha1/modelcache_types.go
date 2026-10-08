@@ -54,12 +54,14 @@ type ModelCacheStatus struct {
 }
 
 type ModelCacheNodeStatus struct {
-	Name           string              `json:"name,omitempty"`
-	State          ModelCacheNodeState `json:"state,omitempty"`
-	ProgressBytes  int64               `json:"progressBytes,omitempty"`
-	MaterializedAt *metav1.Time        `json:"materializedAt,omitempty"`
-	LastUsedAt     *metav1.Time        `json:"lastUsedAt,omitempty"`
-	Message        string              `json:"message,omitempty"`
+	Name            string              `json:"name,omitempty"`
+	NodeUID         string              `json:"nodeUID,omitempty"`
+	ProcessedJobUID string              `json:"processedJobUID,omitempty"`
+	State           ModelCacheNodeState `json:"state,omitempty"`
+	ProgressBytes   int64               `json:"progressBytes,omitempty"`
+	MaterializedAt  *metav1.Time        `json:"materializedAt,omitempty"`
+	LastUsedAt      *metav1.Time        `json:"lastUsedAt,omitempty"`
+	Message         string              `json:"message,omitempty"`
 }
 
 func (m *ModelCache) Default() {

@@ -53,6 +53,9 @@ func (in *InferenceEndpointList) DeepCopyObject() runtime.Object {
 
 func (in *InferenceEndpointStatus) DeepCopyInto(out *InferenceEndpointStatus) {
 	*out = *in
+	if in.Placement.Nodes != nil {
+		out.Placement.Nodes = append([]string(nil), in.Placement.Nodes...)
+	}
 	if in.LastActivityTime != nil {
 		out.LastActivityTime = in.LastActivityTime.DeepCopy()
 	}

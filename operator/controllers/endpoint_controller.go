@@ -90,6 +90,9 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, err
 	}
+	if err := r.observePlacement(ctx, endpoint); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	placement, waitReason, waitMessage, err := r.resolvePlacement(ctx, endpoint, modelCache, profile.GPUCount)
 	if err != nil {
@@ -100,7 +103,6 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	if placement == nil {
-		endpoint.Status.Placement.Node = ""
 		endpoint.Status.Placement.CacheState = "Pending"
 		if waitReason == servingv1alpha1.ReasonWeightDownloadFailed || waitReason == servingv1alpha1.ReasonInsufficientGPU {
 			r.setDegraded(endpoint, waitReason, waitMessage)
@@ -113,7 +115,6 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	endpoint.Status.Placement.Node = placement.NodeName
 	endpoint.Status.Placement.CacheState = placement.CacheState
 	initialReplicas := desiredReplicasFor(endpoint)
 	explicitActivation := endpoint.Annotations[platform.ActivationAnnotation] != ""
@@ -178,7 +179,7 @@ func (r *EndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if requeueAfter := r.requeueAfter(endpoint); requeueAfter > 0 {
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{}, nil
 }
 
 func (r *EndpointReconciler) reconcileDelete(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint) (ctrl.Result, error) {
@@ -315,21 +316,16 @@ func (r *EndpointReconciler) ensureModelCache(ctx context.Context, model catalog
 func (r *EndpointReconciler) resolvePlacement(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint, modelCache *servingv1alpha1.ModelCache, requiredGPU int32) (*resources.CachePlacement, string, string, error) {
 	labelKey := catalog.CacheLabelKey(modelCache.Spec.ModelID, modelCache.Spec.Revision)
 	nodes := &corev1.NodeList{}
-	if err := r.direct().List(ctx, nodes); err != nil {
+	if err := r.Client.List(ctx, nodes, client.MatchingFields{nodeModelCacheIndex: labelKey}); err != nil {
 		return nil, "", "", err
 	}
-	eligibleWarm := make([]corev1.Node, 0)
 	for _, node := range nodes.Items {
-		if !selectorMatches(node.Labels, modelCache.Spec.NodePoolSelector) || !nodeReady(node) {
+		if !selectorMatches(node.Labels, modelCache.Spec.NodePoolSelector) || !nodeSchedulable(node) {
 			continue
 		}
 		if node.Labels[labelKey] == "ready" && gpuAllocatable(node) >= int64(requiredGPU) {
-			eligibleWarm = append(eligibleWarm, node)
+			return &resources.CachePlacement{CacheHash: catalog.CacheHash(modelCache.Spec.ModelID, modelCache.Spec.Revision), CacheState: "Hit", ExpectedDigest: modelCache.Spec.Digest, ExpectedSize: modelCache.Spec.SizeBytes}, "", "", nil
 		}
-	}
-	if len(eligibleWarm) > 0 {
-		sort.Slice(eligibleWarm, func(i, j int) bool { return eligibleWarm[i].Name < eligibleWarm[j].Name })
-		return &resources.CachePlacement{NodeName: eligibleWarm[0].Name, CacheHash: catalog.CacheHash(modelCache.Spec.ModelID, modelCache.Spec.Revision), CacheState: "Hit", ExpectedDigest: modelCache.Spec.Digest, ExpectedSize: modelCache.Spec.SizeBytes}, "", "", nil
 	}
 	if condition := servingv1alpha1.MessageFromModelCache(modelCache.Status); condition != "" {
 		reason := servingv1alpha1.ReasonFromModelCache(modelCache.Status)
@@ -343,6 +339,29 @@ func (r *EndpointReconciler) resolvePlacement(ctx context.Context, endpoint *ser
 		}
 	}
 	return nil, servingv1alpha1.ReasonLoadingWeights, message, nil
+}
+
+func (r *EndpointReconciler) observePlacement(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint) error {
+	pods := &corev1.PodList{}
+	if err := r.Client.List(ctx, pods, client.InNamespace(endpoint.Status.WorkloadNamespace), client.MatchingLabels(resources.ManagedLabels(endpoint))); err != nil {
+		return err
+	}
+	observed := map[string]bool{}
+	for _, pod := range pods.Items {
+		if pod.Spec.NodeName != "" && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			observed[pod.Spec.NodeName] = true
+		}
+	}
+	endpoint.Status.Placement.Node = ""
+	endpoint.Status.Placement.Nodes = nil
+	for nodeName := range observed {
+		endpoint.Status.Placement.Nodes = append(endpoint.Status.Placement.Nodes, nodeName)
+	}
+	sort.Strings(endpoint.Status.Placement.Nodes)
+	if len(endpoint.Status.Placement.Nodes) == 1 {
+		endpoint.Status.Placement.Node = endpoint.Status.Placement.Nodes[0]
+	}
+	return nil
 }
 
 func selectorMatches(labels, selector map[string]string) bool {
@@ -426,7 +445,17 @@ func (r *EndpointReconciler) updateStatusIfChanged(ctx context.Context, endpoint
 }
 
 func (r *EndpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&servingv1alpha1.InferenceEndpoint{}).Watches(&servingv1alpha1.ModelCache{}, handler.EnqueueRequestsFromMapFunc(r.requestsForModelCache)).Complete(r)
+	return ctrl.NewControllerManagedBy(mgr).For(&servingv1alpha1.InferenceEndpoint{}).
+		Watches(&servingv1alpha1.ModelCache{}, handler.EnqueueRequestsFromMapFunc(r.requestsForModelCache)).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.requestsForEngine)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.requestsForEngine)).Complete(r)
+}
+
+func (r *EndpointReconciler) requestsForEngine(_ context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetLabels()[resources.LabelManaged] != resources.ManagedValue || obj.GetLabels()[resources.LabelEndpointName] == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: r.managedNamespace(), Name: obj.GetLabels()[resources.LabelEndpointName]}}}
 }
 
 func (r *EndpointReconciler) requestsForModelCache(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -435,7 +464,7 @@ func (r *EndpointReconciler) requestsForModelCache(ctx context.Context, obj clie
 		return nil
 	}
 	endpoints := &servingv1alpha1.InferenceEndpointList{}
-	if err := r.Client.List(ctx, endpoints, client.InNamespace(r.managedNamespace())); err != nil {
+	if err := r.Client.List(ctx, endpoints, client.InNamespace(r.managedNamespace()), client.MatchingFields{endpointModelIndex: modelCache.Spec.ModelID + "@" + modelCache.Spec.Revision}); err != nil {
 		return nil
 	}
 	requests := make([]reconcile.Request, 0)

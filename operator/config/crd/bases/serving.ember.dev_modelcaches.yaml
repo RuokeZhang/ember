@@ -64,6 +64,10 @@ spec:
                     properties:
                       name:
                         type: string
+                      nodeUID:
+                        type: string
+                      processedJobUID:
+                        type: string
                       state:
                         type: string
                         enum: [Pending, Loading, Ready, Failed]

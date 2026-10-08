@@ -123,6 +123,10 @@ spec:
                   properties:
                     node:
                       type: string
+                    nodes:
+                      type: array
+                      items:
+                        type: string
                     cacheState:
                       type: string
                 model:

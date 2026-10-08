@@ -56,6 +56,7 @@ export interface EndpointRuntime {
   };
   placement?: {
     node?: string;
+    nodes?: string[];
     cacheState?: string;
   };
   model?: {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -61,23 +63,31 @@ func (e *ValidationError) Error() string {
 
 type KubernetesStore struct {
 	Client         client.Client
+	EndpointReader client.Reader
 	Core           kubernetes.Interface
 	Namespace      string
 	Now            func() time.Time
 	ActivityWindow time.Duration
 
-	mu           sync.Mutex
-	lastActivity map[types.UID]time.Time
+	mu       sync.Mutex
+	activity map[types.UID]*endpointActivity
+}
+
+type endpointActivity struct {
+	mu             sync.Mutex
+	lastActivity   time.Time
+	lastActivation time.Time
 }
 
 func NewKubernetesStore(c client.Client, core kubernetes.Interface, namespace string) *KubernetesStore {
 	return &KubernetesStore{
 		Client:         c,
+		EndpointReader: c,
 		Core:           core,
 		Namespace:      namespace,
 		Now:            func() time.Time { return time.Now().UTC() },
 		ActivityWindow: 30 * time.Second,
-		lastActivity:   map[types.UID]time.Time{},
+		activity:       map[types.UID]*endpointActivity{},
 	}
 }
 
@@ -124,9 +134,17 @@ func (s *KubernetesStore) CreateEndpoint(ctx context.Context, ownerID, name stri
 }
 
 func (s *KubernetesStore) GetEndpoint(ctx context.Context, ownerID, name string) (*servingv1alpha1.InferenceEndpoint, error) {
+	endpoint, err := s.getOwnedEndpoint(ctx, s.EndpointReader, ownerID, name)
+	if errors.Is(err, ErrEndpointNotFound) {
+		return s.getOwnedEndpoint(ctx, s.Client, ownerID, name)
+	}
+	return endpoint, err
+}
+
+func (s *KubernetesStore) getOwnedEndpoint(ctx context.Context, reader client.Reader, ownerID, name string) (*servingv1alpha1.InferenceEndpoint, error) {
 	endpoint := &servingv1alpha1.InferenceEndpoint{}
-	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, endpoint); err != nil {
-		if client.IgnoreNotFound(err) == nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, endpoint); err != nil {
+		if apierrors.IsNotFound(err) {
 			return nil, ErrEndpointNotFound
 		}
 		return nil, err
@@ -138,11 +156,17 @@ func (s *KubernetesStore) GetEndpoint(ctx context.Context, ownerID, name string)
 }
 
 func (s *KubernetesStore) DeleteEndpoint(ctx context.Context, ownerID, name string) error {
-	endpoint, err := s.GetEndpoint(ctx, ownerID, name)
+	endpoint, err := s.getOwnedEndpoint(ctx, s.Client, ownerID, name)
 	if err != nil {
 		return err
 	}
-	return s.Client.Delete(ctx, endpoint)
+	if err := s.Client.Delete(ctx, endpoint, client.Preconditions{UID: &endpoint.UID, ResourceVersion: &endpoint.ResourceVersion}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.activity, endpoint.UID)
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *KubernetesStore) EngineLogs(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint, tailLines int64) (string, error) {
@@ -193,46 +217,73 @@ func (s *KubernetesStore) MarkActivity(ctx context.Context, ownerID, name string
 	if err != nil {
 		return err
 	}
-	now := s.now()
-	if activate {
-		base := endpoint.DeepCopy()
-		if endpoint.Annotations == nil {
-			endpoint.Annotations = map[string]string{}
-		}
-		endpoint.Annotations[ActivationAnnotation] = now.Format(time.RFC3339Nano)
-		if err := s.Client.Patch(ctx, endpoint, client.MergeFrom(base)); err != nil {
-			return fmt.Errorf("set activation annotation: %w", err)
-		}
+	if !endpoint.DeletionTimestamp.IsZero() {
+		return ErrEndpointNotFound
 	}
-
-	if !s.shouldWriteActivity(endpoint.UID, now) {
+	s.mu.Lock()
+	activity := s.activity[endpoint.UID]
+	if activity == nil {
+		activity = &endpointActivity{}
+		s.activity[endpoint.UID] = activity
+	}
+	s.mu.Unlock()
+	activity.mu.Lock()
+	defer activity.mu.Unlock()
+	now := s.now()
+	if activate && (activity.lastActivation.IsZero() || now.Sub(activity.lastActivation) >= 5*time.Second) {
+		if err := s.patchActivity(ctx, endpoint, ownerID, now, true); err != nil {
+			return err
+		}
+		activity.lastActivation = now
+	}
+	if !activity.lastActivity.IsZero() && now.Sub(activity.lastActivity) < s.activityWindow() {
 		return nil
 	}
-	current, err := s.GetEndpoint(ctx, ownerID, name)
-	if err != nil {
+	if err := s.patchActivity(ctx, endpoint, ownerID, now, false); err != nil {
 		return err
 	}
-	base := current.DeepCopy()
-	stamp := metav1.NewTime(now)
-	current.Status.LastActivityTime = &stamp
-	if err := s.Client.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("update last activity: %w", err)
-	}
-	s.recordActivity(endpoint.UID, now)
+	activity.lastActivity = now
 	return nil
 }
 
-func (s *KubernetesStore) shouldWriteActivity(uid types.UID, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	last, ok := s.lastActivity[uid]
-	return !ok || now.Sub(last) >= s.activityWindow()
-}
-
-func (s *KubernetesStore) recordActivity(uid types.UID, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastActivity[uid] = now
+func (s *KubernetesStore) patchActivity(ctx context.Context, endpoint *servingv1alpha1.InferenceEndpoint, ownerID string, now time.Time, activate bool) error {
+	originalUID := endpoint.UID
+	refresh := false
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if refresh {
+			current, err := s.getOwnedEndpoint(ctx, s.Client, ownerID, endpoint.Name)
+			if err != nil {
+				return err
+			}
+			if current.UID != originalUID || !current.DeletionTimestamp.IsZero() {
+				return ErrEndpointNotFound
+			}
+			*endpoint = *current
+		}
+		refresh = true
+		if !activate && endpoint.Status.LastActivityTime != nil && !endpoint.Status.LastActivityTime.Before(&metav1.Time{Time: now}) {
+			return nil
+		}
+		current := endpoint.DeepCopy()
+		payload := map[string]any{"metadata": map[string]any{"uid": current.UID, "resourceVersion": current.ResourceVersion}}
+		if activate {
+			payload["metadata"].(map[string]any)["annotations"] = map[string]string{ActivationAnnotation: now.Format(time.RFC3339Nano)}
+		} else {
+			payload["status"] = map[string]any{"lastActivityTime": metav1.NewTime(now)}
+		}
+		data, _ := json.Marshal(payload)
+		patch := client.RawPatch(types.MergePatchType, data)
+		var err error
+		if activate {
+			err = s.Client.Patch(ctx, current, patch)
+		} else {
+			err = s.Client.Status().Patch(ctx, current, patch)
+		}
+		if err == nil {
+			*endpoint = *current
+		}
+		return err
+	})
 }
 
 func (s *KubernetesStore) activityWindow() time.Duration {

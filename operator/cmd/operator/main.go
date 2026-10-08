@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -46,6 +47,8 @@ func main() {
 		LeaderElectionID:       "ember-operator-serving.ember.dev",
 	})
 	must(err)
+
+	must(controllers.RegisterIndexes(context.Background(), mgr.GetFieldIndexer()))
 
 	directClient, err := crclient.New(ctrl.GetConfigOrDie(), crclient.Options{Scheme: scheme})
 	must(err)

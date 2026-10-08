@@ -12,7 +12,8 @@ export function LifecyclePanel({ endpoint, observations }: LifecyclePanelProps) 
   const runtime = endpoint.runtime;
   const ready = (runtime?.replicas?.ready ?? 0) > 0;
   const cacheResolved = Boolean(runtime?.placement?.cacheState);
-  const scheduled = Boolean(runtime?.placement?.node);
+  const nodeNames = runtime?.placement?.nodes?.join(", ");
+  const scheduled = Boolean(nodeNames);
   const deleted = runtime?.phase === "Deleted";
   const scaled = (runtime?.replicas?.desired ?? 0) > 1;
   const steps = [
@@ -30,7 +31,7 @@ export function LifecyclePanel({ endpoint, observations }: LifecyclePanelProps) 
     },
     {
       label: "GPU scheduled",
-      detail: runtime?.placement?.node || "awaiting placement",
+      detail: nodeNames || "awaiting placement",
       state: scheduled ? "done" : cacheResolved ? "active" : "pending",
       icon: "gpu" as const
     },

@@ -40,7 +40,7 @@ func TestDeploymentSecurityAndCacheVerification(t *testing.T) {
 	endpoint := validEndpoint()
 	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
 	profile, _ := catalog.LookupProfile("tp2")
-	placement := CachePlacement{NodeName: "node-a", CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.SimulationArtifact.Digest, ExpectedSize: model.SimulationArtifact.SizeBytes}
+	placement := CachePlacement{CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.SimulationArtifact.Digest, ExpectedSize: model.SimulationArtifact.SizeBytes}
 
 	deployment := Deployment(endpoint, model, profile, placement, 1, true, PrefetchImage)
 	container := deployment.Spec.Template.Spec.Containers[0]
@@ -89,7 +89,7 @@ func TestRealDeploymentUsesPinnedOfflineVLLMRuntime(t *testing.T) {
 	endpoint := validEndpoint()
 	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
 	profile, _ := catalog.LookupProfile("standard")
-	placement := CachePlacement{NodeName: "node-a", CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.Digest, ExpectedSize: model.SizeBytes}
+	placement := CachePlacement{CacheHash: catalog.CacheHashForModel(model), CacheState: "Hit", ExpectedDigest: model.Digest, ExpectedSize: model.SizeBytes}
 
 	deployment := Deployment(endpoint, model, profile, placement, 1, false, "registry.example/ember-prefetch@sha256:1234")
 	container := deployment.Spec.Template.Spec.Containers[0]
@@ -129,9 +129,12 @@ func TestPrefetchJobSecurityAndArgs(t *testing.T) {
 	model, _ := catalog.LookupModel("qwen2.5-7b-instruct-awq")
 	cache := &servingv1alpha1.ModelCache{ObjectMeta: metav1.ObjectMeta{Name: catalog.ModelCacheNameForModel(model), UID: types.UID("cache-uid")}, Spec: servingv1alpha1.ModelCacheSpec{ModelID: model.ID, Revision: model.Revision, Digest: model.SimulationArtifact.Digest, SizeBytes: model.SimulationArtifact.SizeBytes}}
 
-	job := PrefetchJob(cache, "node-a", true, PrefetchImage)
+	job := PrefetchJob(cache, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: "node-uid"}}, true, PrefetchImage)
 	if job.Spec.Template.Spec.ServiceAccountName != PrefetchServiceAccountName {
 		t.Fatalf("expected prefetch SA %q, got %q", PrefetchServiceAccountName, job.Spec.Template.Spec.ServiceAccountName)
+	}
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != PrefetchJobDeadlineSeconds || job.Labels["ember.dev/node-uid"] != "node-uid" {
+		t.Fatal("prefetch must have a finite deadline and target Node UID")
 	}
 	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != PrefetchJobTTLSeconds {
 		t.Fatalf("expected job TTL %d, got %#v", PrefetchJobTTLSeconds, job.Spec.TTLSecondsAfterFinished)
@@ -172,7 +175,7 @@ func TestPrefetchJobSecurityAndArgs(t *testing.T) {
 	realCache := cache.DeepCopy()
 	realCache.Spec.Digest = model.Digest
 	realCache.Spec.SizeBytes = model.SizeBytes
-	realJob := PrefetchJob(realCache, "node-a", false, "registry.example/ember-prefetch@sha256:1234")
+	realJob := PrefetchJob(realCache, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: "node-uid"}}, false, "registry.example/ember-prefetch@sha256:1234")
 	realArgs := realJob.Spec.Template.Spec.Containers[0].Args
 	if contains(realArgs, "--synthetic") || !contains(realArgs, "--model-id") || !contains(realArgs, model.ID) || !contains(realArgs, "--revision") || !contains(realArgs, model.Revision) {
 		t.Fatalf("expected immutable real prefetch args, got %#v", realArgs)
@@ -278,3 +281,24 @@ func validEndpoint() *servingv1alpha1.InferenceEndpoint {
 }
 
 var _ = batchv1.Job{}
+
+func TestDeploymentMatchesReadyCacheAcrossTheSelectedPool(t *testing.T) {
+	endpoint := validEndpoint()
+	model, _ := catalog.LookupModel(endpoint.Spec.Model.ID)
+	model.NodePoolSelector = catalog.CopySelector(model.NodePoolSelector)
+	model.NodePoolSelector["zone"] = "zone-a"
+	profile, _ := catalog.LookupProfile("standard")
+	deployment := Deployment(endpoint, model, profile, CachePlacement{CacheHash: catalog.CacheHashForModel(model)}, 2, true, "")
+	pod := deployment.Spec.Template.Spec
+	if pod.NodeName != "" || pod.NodeSelector["kubernetes.io/hostname"] != "" || pod.NodeSelector["zone"] != "zone-a" {
+		t.Fatalf("incorrect pool restrictions: %#v", pod.NodeSelector)
+	}
+	terms := pod.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchExpressions) != 1 {
+		t.Fatalf("unexpected cache affinity: %#v", terms)
+	}
+	expression := terms[0].MatchExpressions[0]
+	if expression.Key != catalog.CacheLabelKeyForModel(model) || expression.Operator != corev1.NodeSelectorOpIn || len(expression.Values) != 1 || expression.Values[0] != "ready" {
+		t.Fatalf("Pod does not require the matching ready cache: %#v", expression)
+	}
+}

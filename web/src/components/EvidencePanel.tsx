@@ -68,7 +68,7 @@ export function EvidencePanel({ endpoint, events, logs, error, onRefresh }: Evid
         <div className="log-console">
           <div className="console-bar">
             <span><i className="console-dot red" /><i className="console-dot amber" /><i className="console-dot green" /></span>
-            <code>{endpoint.runtime?.placement?.node ?? "engine pod"} · last 250 lines · max 256 KiB</code>
+            <code>latest engine pod · last 250 lines · max 256 KiB</code>
             <Tag tone="safe"><Icon name="shield" size={12} /> redacted</Tag>
           </div>
           <pre>{logs || error || "Engine logs are not available until a serving Pod exists."}</pre>

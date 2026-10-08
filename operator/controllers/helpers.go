@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	servingv1alpha1 "github.com/RuokeZhang/ember/operator/api/v1alpha1"
@@ -17,6 +18,125 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const (
+	nodeModelCacheIndex = "ember.dev/node-model-cache"
+	nodeGPUPoolIndex    = "ember.dev/node-gpu-pool"
+	endpointModelIndex  = "ember.dev/endpoint-model"
+	podNodeIndex        = "ember.dev/pod-node"
+)
+
+func RegisterIndexes(ctx context.Context, indexer client.FieldIndexer) error {
+	if err := indexer.IndexField(ctx, &corev1.Node{}, nodeModelCacheIndex, nodeModelCacheKeys); err != nil {
+		return err
+	}
+	if err := indexer.IndexField(ctx, &corev1.Node{}, nodeGPUPoolIndex, nodeGPUPoolKeys); err != nil {
+		return err
+	}
+	if err := indexer.IndexField(ctx, &servingv1alpha1.InferenceEndpoint{}, endpointModelIndex, endpointModelKeys); err != nil {
+		return err
+	}
+	return indexer.IndexField(ctx, &corev1.Pod{}, podNodeIndex, podNodeKeys)
+}
+
+func podNodeKeys(obj client.Object) []string {
+	pod := obj.(*corev1.Pod)
+	if pod.Spec.NodeName == "" || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || podGPURequests(pod) == 0 {
+		return nil
+	}
+	return []string{pod.Spec.NodeName}
+}
+
+func podGPURequests(pod *corev1.Pod) int64 {
+	gpuRequest := func(container corev1.Container) int64 {
+		quantity, exists := container.Resources.Requests[corev1.ResourceName("nvidia.com/gpu")]
+		if !exists {
+			quantity = container.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]
+		}
+		return quantity.Value()
+	}
+	var regularRequests, sidecarRequests, initPeak int64
+	for _, container := range pod.Spec.Containers {
+		regularRequests += gpuRequest(container)
+	}
+	for _, container := range pod.Spec.InitContainers {
+		requests := gpuRequest(container)
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecarRequests += requests
+			requests = sidecarRequests
+		} else {
+			requests += sidecarRequests
+		}
+		if requests > initPeak {
+			initPeak = requests
+		}
+	}
+	requests := regularRequests + sidecarRequests
+	if initPeak > requests {
+		requests = initPeak
+	}
+	overhead := pod.Spec.Overhead[corev1.ResourceName("nvidia.com/gpu")]
+	return requests + overhead.Value()
+}
+
+func nodeSchedulable(node corev1.Node) bool {
+	if !nodeReady(node) || node.Spec.Unschedulable || !node.DeletionTimestamp.IsZero() {
+		return false
+	}
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if taint.Key != "nvidia.com/gpu" || taint.Value != "present" || taint.Effect != corev1.TaintEffectNoSchedule {
+			return false
+		}
+	}
+	return true
+}
+
+func nodeModelCacheKeys(obj client.Object) []string {
+	node := obj.(*corev1.Node)
+	if !nodeReady(*node) {
+		return nil
+	}
+	var keys []string
+	for labelKey, state := range node.Labels {
+		if strings.HasPrefix(labelKey, "cache.ember.dev/") && (state == "ready" || state == "loading") {
+			keys = append(keys, labelKey)
+		}
+	}
+	return keys
+}
+
+func nodeGPUPoolKeys(obj client.Object) []string {
+	node := obj.(*corev1.Node)
+	if !nodeSchedulable(*node) || gpuAllocatable(*node) <= 0 {
+		return nil
+	}
+	keys := []string{"*"}
+	for labelKey, value := range node.Labels {
+		keys = append(keys, labelKey+"="+value)
+	}
+	return keys
+}
+
+func gpuPoolIndexKey(selector map[string]string) string {
+	var selectedKey string
+	for labelKey := range selector {
+		if selectedKey == "" || labelKey < selectedKey {
+			selectedKey = labelKey
+		}
+	}
+	if selectedKey == "" {
+		return "*"
+	}
+	return selectedKey + "=" + selector[selectedKey]
+}
+
+func endpointModelKeys(obj client.Object) []string {
+	endpoint := obj.(*servingv1alpha1.InferenceEndpoint)
+	return []string{endpoint.Spec.Model.ID + "@" + endpoint.Spec.Model.Revision}
+}
 
 type Clock interface {
 	Now() time.Time
@@ -165,10 +285,13 @@ func copyStringMap(values map[string]string) map[string]string {
 	return copied
 }
 
-func updateNodeLabel(ctx context.Context, c client.Client, nodeName, labelKey, labelValue string) error {
+func updateNodeLabel(ctx context.Context, c client.Client, nodeName, expectedUID, labelKey, labelValue string) error {
 	node := &corev1.Node{}
 	if err := c.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
 		return err
+	}
+	if string(node.UID) != expectedUID {
+		return fmt.Errorf("node %s was replaced", nodeName)
 	}
 	node = node.DeepCopy()
 	if node.Labels == nil {

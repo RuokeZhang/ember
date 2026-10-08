@@ -194,7 +194,7 @@ export function EndpointDashboard({ endpoint, catalog, onRefresh, onDelete }: En
       <section className="endpoint-stat-strip">
         <HeaderStat icon="layers" label="Replicas" value={`${endpoint.runtime?.replicas?.ready ?? 0} / ${endpoint.runtime?.replicas?.desired ?? 0}`} detail={`max ${endpoint.maxReplicas}`} />
         <HeaderStat icon="gpu" label="GPU allocation" value={`${allocatedGPUs} L4`} detail={`${profile?.gpuCount ?? 0} per replica`} />
-        <HeaderStat icon="database" label="Cache state" value={endpoint.runtime?.placement?.cacheState ?? "Pending"} detail={endpoint.runtime?.placement?.node ?? "node undecided"} />
+        <HeaderStat icon="database" label="Cache state" value={endpoint.runtime?.placement?.cacheState ?? "Pending"} detail={endpoint.runtime?.placement?.nodes?.join(", ") || "node undecided"} />
         <HeaderStat icon="box" label="Model weights" value={formatBytes(endpoint.runtime?.model?.sizeBytes ?? model?.sizeBytes)} detail={shortID(endpoint.runtime?.model?.resolvedDigest ?? model?.digest, 18)} />
         <HeaderStat icon="clock" label="Last activity" value={formatRelativeTime(endpoint.runtime?.lastActivityTime)} detail={`zero after ${Math.round(endpoint.idleTimeoutSeconds / 60)}m`} />
       </section>

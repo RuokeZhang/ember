@@ -38,6 +38,14 @@ tidy:
 test:
 	$(GO_DOCKER) go test ./...
 
+.PHONY: test-race
+test-race:
+	$(GO_DOCKER) go test -race ./operator/controllers ./gateway/internal/gateway
+
+.PHONY: operator-benchmark
+operator-benchmark:
+	$(GO_DOCKER) go test ./operator/controllers -run '^$$' -bench '^BenchmarkNodeCacheLookup$$' -benchmem -benchtime=1s -count=3
+
 vet:
 	$(GO_DOCKER) go vet ./...
 

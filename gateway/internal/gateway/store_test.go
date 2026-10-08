@@ -2,6 +2,11 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +16,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -281,4 +287,234 @@ func inspectionHasSecurityState(inspection *EndpointInspection, name, state stri
 		}
 	}
 	return false
+}
+
+func TestKubernetesStoreCachedReadsAndConcurrentActivityCoalescing(t *testing.T) {
+	ctx := context.Background()
+	endpoint := readyEndpoint("ep-cached", "owner-a")
+	store, direct := newTestKubernetesStore(t, endpoint)
+	_, cached := newTestKubernetesStore(t, endpoint)
+	counter := &activityCountingClient{Client: direct}
+	store.Client, store.EndpointReader = counter, cached
+	store.Now = func() time.Time { return time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC) }
+	if _, err := store.GetEndpoint(ctx, "owner-b", endpoint.Name); err != ErrEndpointNotFound {
+		t.Fatalf("cached owner check failed: %v", err)
+	}
+	counter.gets.Store(0)
+	var workers sync.WaitGroup
+	errorsSeen := make(chan error, 64)
+	for request := 0; request < 64; request++ {
+		workers.Add(1)
+		go func() { defer workers.Done(); errorsSeen <- store.MarkActivity(ctx, "owner-a", endpoint.Name, true) }()
+	}
+	workers.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if counter.gets.Load() != 0 || counter.metadataPatches.Load() != 1 || counter.statusPatches.Load() != 1 {
+		t.Fatalf("unexpected API operations: GET=%d activation=%d activity=%d", counter.gets.Load(), counter.metadataPatches.Load(), counter.statusPatches.Load())
+	}
+	for request := 0; request < 20; request++ {
+		if err := store.MarkActivity(ctx, "owner-a", endpoint.Name, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if counter.gets.Load() != 0 || counter.statusPatches.Load() != 1 {
+		t.Fatal("warm requests continued accessing the API server")
+	}
+}
+
+func TestKubernetesStoreFailedActivityWriteIsRetryable(t *testing.T) {
+	ctx := context.Background()
+	endpoint := readyEndpoint("ep-retry", "owner-a")
+	store, direct := newTestKubernetesStore(t, endpoint)
+	counter := &activityCountingClient{Client: direct}
+	counter.failNextStatus.Store(true)
+	store.Client = counter
+	if err := store.MarkActivity(ctx, "owner-a", endpoint.Name, false); err == nil {
+		t.Fatal("expected the first write to fail")
+	}
+	if err := store.MarkActivity(ctx, "owner-a", endpoint.Name, false); err != nil {
+		t.Fatal(err)
+	}
+	if counter.statusPatches.Load() != 2 {
+		t.Fatal("failed write incorrectly consumed the activity window")
+	}
+}
+
+func TestKubernetesStoreStaleCacheCannotMutateOrDeleteReplacement(t *testing.T) {
+	ctx := context.Background()
+	old := readyEndpoint("ep-reused", "old-owner")
+	old.UID = "old-uid"
+	_, cached := newTestKubernetesStore(t, old)
+	replacement := readyEndpoint(old.Name, "new-owner")
+	replacement.UID = "new-uid"
+	store, direct := newTestKubernetesStore(t, replacement)
+	counter := &activityCountingClient{Client: direct}
+	store.Client, store.EndpointReader = counter, cached
+	for _, activate := range []bool{false, true} {
+		if err := store.MarkActivity(ctx, "old-owner", old.Name, activate); err != ErrEndpointNotFound {
+			t.Fatalf("stale activity mutation was not rejected: %v", err)
+		}
+	}
+	if err := store.DeleteEndpoint(ctx, "old-owner", old.Name); err != ErrEndpointNotFound {
+		t.Fatalf("stale delete was not rejected: %v", err)
+	}
+	current := &servingv1alpha1.InferenceEndpoint{}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(replacement), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.UID != replacement.UID || current.Status.LastActivityTime != nil {
+		t.Fatalf("replacement was modified: %#v", current)
+	}
+	if err := store.DeleteEndpoint(ctx, "new-owner", replacement.Name); err != nil {
+		t.Fatal(err)
+	}
+	if !counter.deleteProtected.Load() {
+		t.Fatal("endpoint deletion had no UID/resource-version preconditions")
+	}
+}
+
+func TestKubernetesStoreConflictRefreshPreservesNewerActivity(t *testing.T) {
+	ctx := context.Background()
+	endpoint := readyEndpoint("ep-conflict", "owner-a")
+	_, cached := newTestKubernetesStore(t, endpoint)
+	store, direct := newTestKubernetesStore(t, endpoint)
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	current := &servingv1alpha1.InferenceEndpoint{}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(endpoint), current); err != nil {
+		t.Fatal(err)
+	}
+	stamp := metav1.NewTime(now.Add(time.Second))
+	current.Status.LastActivityTime = &stamp
+	if err := direct.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	counter := &activityCountingClient{Client: direct}
+	store.Client, store.EndpointReader = counter, cached
+	store.Now = func() time.Time { return now }
+	if err := store.MarkActivity(ctx, "owner-a", endpoint.Name, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(endpoint), current); err != nil {
+		t.Fatal(err)
+	}
+	if !current.Status.LastActivityTime.Equal(&stamp) || counter.gets.Load() != 1 {
+		t.Fatal("conflict refresh overwrote newer activity or skipped the live ownership check")
+	}
+}
+
+type activityCountingClient struct {
+	client.Client
+	gets            atomic.Int32
+	metadataPatches atomic.Int32
+	statusPatches   atomic.Int32
+	failNextStatus  atomic.Bool
+	deleteProtected atomic.Bool
+}
+
+func (c *activityCountingClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+	c.gets.Add(1)
+	return c.Client.Get(ctx, key, object, options...)
+}
+
+func (c *activityCountingClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	c.metadataPatches.Add(1)
+	if err := c.checkActivityPreconditions(ctx, object, patch); err != nil {
+		return err
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
+}
+
+func (c *activityCountingClient) Delete(ctx context.Context, object client.Object, options ...client.DeleteOption) error {
+	settings := &client.DeleteOptions{}
+	for _, option := range options {
+		option.ApplyToDelete(settings)
+	}
+	if settings.Preconditions != nil && settings.Preconditions.UID != nil && settings.Preconditions.ResourceVersion != nil {
+		c.deleteProtected.Store(true)
+	}
+	return c.Client.Delete(ctx, object, options...)
+}
+
+func (c *activityCountingClient) Status() client.SubResourceWriter {
+	return activityCountingStatusWriter{SubResourceWriter: c.Client.Status(), counter: c}
+}
+
+type activityCountingStatusWriter struct {
+	client.SubResourceWriter
+	counter *activityCountingClient
+}
+
+func (writer activityCountingStatusWriter) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+	writer.counter.statusPatches.Add(1)
+	if writer.counter.failNextStatus.Swap(false) {
+		return errors.New("temporary activity write failure")
+	}
+	if err := writer.counter.checkActivityPreconditions(ctx, object, patch); err != nil {
+		return err
+	}
+	return writer.SubResourceWriter.Patch(ctx, object, patch, options...)
+}
+
+func (c *activityCountingClient) checkActivityPreconditions(ctx context.Context, object client.Object, patch client.Patch) error {
+	current := &servingv1alpha1.InferenceEndpoint{}
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(object), current); err != nil {
+		return err
+	}
+	data, err := patch.Data(object)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		Metadata struct {
+			UID             string
+			ResourceVersion string
+		}
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	if payload.Metadata.UID != string(current.UID) || payload.Metadata.ResourceVersion != current.ResourceVersion {
+		return apierrors.NewConflict(schema.GroupResource{Group: servingv1alpha1.SchemeGroupVersion.Group, Resource: "inferenceendpoints"}, object.GetName(), fmt.Errorf("stale UID or resource version"))
+	}
+	return nil
+}
+
+func TestKubernetesStoreInformerLagAndFinalizerPreservePresence(t *testing.T) {
+	ctx := context.Background()
+	endpoint := readyEndpoint("ep-presence", "owner-a")
+	endpoint.Finalizers = []string{"serving.ember.dev/finalizer"}
+	store, direct := newTestKubernetesStore(t, endpoint)
+	_, emptyCache := newTestKubernetesStore(t)
+	store.EndpointReader = emptyCache
+	if _, err := store.GetEndpoint(ctx, "owner-a", endpoint.Name); err != nil {
+		t.Fatalf("live endpoint was hidden by informer lag: %v", err)
+	}
+	if err := store.DeleteEndpoint(ctx, "owner-a", endpoint.Name); err != nil {
+		t.Fatal(err)
+	}
+	deleting, err := store.GetEndpoint(ctx, "owner-a", endpoint.Name)
+	if err != nil || deleting.DeletionTimestamp.IsZero() {
+		t.Fatalf("finalizer-held endpoint was hidden before cleanup: %#v, %v", deleting, err)
+	}
+	if err := store.MarkActivity(ctx, "owner-a", endpoint.Name, true); err != ErrEndpointNotFound {
+		t.Fatalf("deleting endpoint accepted activation: %v", err)
+	}
+	if err := store.DeleteEndpoint(ctx, "owner-a", endpoint.Name); err != nil {
+		t.Fatalf("retry delete failed while cleanup was active: %v", err)
+	}
+	if err := direct.Get(ctx, client.ObjectKeyFromObject(deleting), deleting); err != nil {
+		t.Fatal(err)
+	}
+	deleting.Finalizers = nil
+	if err := direct.Update(ctx, deleting); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetEndpoint(ctx, "owner-a", endpoint.Name); err != ErrEndpointNotFound {
+		t.Fatalf("completed deletion did not report absence: %v", err)
+	}
 }

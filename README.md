@@ -13,7 +13,7 @@ The Kind control-plane and product milestones are complete. The real-runtime pat
 - A compile-time allowlist for the nine runtime files in `Qwen/Qwen2.5-7B-Instruct-AWQ` revision `b25037543e9394b818fdfca67ab2a00ecc7dd641`.
 - Streaming per-file download, size and SHA-256 verification, bounded safetensors header validation, fsync, and atomic cache publication.
 - A digest-pinned official `vllm/vllm-openai:v0.8.5` runtime that loads only the read-only local cache with remote access and usage telemetry disabled.
-- Cache state encoded as node labels and required hostname affinity for warm placement.
+- Cache state encoded as node labels, with required model-cache affinity allowing replicas across matching GPU nodes.
 - Read-only serving mounts with a non-root cache verification init container.
 - An idempotent Go operator and finalizer-driven cleanup.
 - GPU-aware workload resources with quota, networking, and locked-down service accounts.
@@ -93,6 +93,35 @@ make verify
 ```
 
 Docker is used for deterministic Go tooling when a host Go installation is unavailable.
+
+### Operator lookup scaling
+
+The Operator uses watch-maintained, process-local field indexes for Ready nodes with a model cache, schedulable GPU nodes by pool label, endpoints by model ID plus revision, and bound GPU Pods by node. Placement and cache reconciliation query the shared informer cache instead of fetching every Node from the API server. Node heartbeat-only updates do not trigger cache reconciliation. Initial informer synchronization still lists resources, and lookup cost grows with the number of matching candidates.
+
+Serving Pods require the matching model/revision cache-ready label and GPU-pool selector, allowing Kubernetes to place independent replicas across cached nodes. Cache additions do not change the Pod template. Endpoint placement status reports observed bound Pod nodes through `placement.nodes`; `placement.node` is populated only for exactly one observed node. A two-GPU `tp2` Pod still requires both GPUs on the same node.
+
+`ModelCacheReconciler` copies weights serially as current Deployment replica demand grows. It subtracts all actual bound GPU Pod requests, including terminating Pods, credits existing desired replicas at their actual placement, and fits remaining demand into per-node free capacity. Larger feasible profiles take priority, while unavailable two-GPU capacity does not block one-GPU demand; Kubernetes remains the allocation authority. Prefetch has a finite deadline, validates target Node UID, resumes missing downloads independently of GPU occupancy, records processed Job UID before deleting completed Jobs, and preserves existing cache readiness when an additional download fails. Files remain on disk when demand shrinks. These changes do not implement multi-node tensor parallelism, cache eviction, inference batching, or measured GPU throughput.
+
+Compare full scans with indexed lookups using 100, 1,000, and 10,000 in-memory Node objects, each with ten matching model-cache entries:
+
+```sh
+make operator-benchmark
+```
+
+This benchmark uses the client-go informer indexer and includes copying and filtering candidate objects. It measures local lookup latency and allocations, excluding API-server networking and initial index construction; it is not inference QPS or evidence of a real 10,000-node deployment. Functional index and controller tests run with `make test`.
+
+### Gateway request-path caching
+
+The Gateway synchronizes a namespace-scoped InferenceEndpoint informer before serving HTTP. Endpoint lookups use that cache and still enforce owner checks; cache misses are confirmed through the direct client. Deleting resources remain visible for status until finalizer cleanup finishes. Inspection and mutations retain direct clients. Activity writes are serialized per endpoint UID and coalesced for 30 seconds per Gateway process, while activation bursts are coalesced for at most five seconds. Multiple Gateway replicas each maintain their own window. Conflicting writes reread ownership and UID from the API server; activity patches and endpoint deletion carry UID/resource-version protection.
+
+Run functional regressions and the targeted concurrency checks with:
+
+```sh
+make test
+make test-race
+```
+
+Real 1/2/4-GPU throughput, latency, cross-node expansion, and control-plane measurements remain in the [scaling validation plan](./Ember_Kubernetes_Design_Doc.md#phase-4-follow-up--real-gpu-scaling-validation). No real-GPU performance claim follows from these functional tests.
 
 ### GCP cost guard
 
